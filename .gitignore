@@ -1,0 +1,33 @@
+# .NET build output
+**/bin/
+**/obj/
+**/artifacts/
+
+# Local ASP.NET configuration and secrets
+**/appsettings*.json
+!**/appsettings.*.example.json
+
+# Local project and signing files
+**/*.csproj.user
+**/*.pubxml.user
+**/key.properties
+
+# Flutter/Dart generated files
+**/.dart_tool/
+**/.flutter-plugins
+**/.flutter-plugins-dependencies
+**/.pub-cache/
+**/.pub/
+**/build/
+**/coverage/
+**/ios/Flutter/.last_build_id
+
+# IDE and OS files
+**/.idea/
+**/*.iml
+**/.vscode/
+.DS_Store
+
+# Flutter generated symbols and maps
+**/app.*.symbols
+**/app.*.map.json
