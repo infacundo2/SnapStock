@@ -1,84 +1,68 @@
 # Estado de SnapStock
 
-Fecha de revisión: 17 de agosto de 2026.
+Fecha de revisión: 27 de agosto de 2026.
 
-## Componentes
+## Estado local
 
-### SnapStock QR 3.0.0
+- MySQL: servicio `SnapStockMySQL`, datos en `C:\ProgramData\SnapStockMySQL\data`.
+- API: servicio `SnapStockApi`, origen privado `http://127.0.0.1:5000`.
+- HTTPS local: servicio `Caddy`, URL `https://192.168.140.171`.
+- Fotografías: `C:\ProgramData\SnapStockApi\fotos`.
+- Modo activo: local.
+- `GET /api/Registros/test` comprobado correctamente.
 
-Aplicación Flutter Android ubicada en `SnapStockQR 3.0.0`.
+Los servicios MySQL, API y Caddy tienen inicio automático y recuperación ante fallos.
 
-Funciones conservadas:
+## Cambio de entorno
 
-- Login corporativo.
-- Roles de consulta (`tipo = 1`) y administración (`tipo = 2`).
-- Inventario con fotografías y categorías.
-- Consulta mediante QR y deep links.
-- Gestión de usuarios.
-- Exportación a Excel.
-- Impresión de etiquetas QR mediante LPR/ZPL.
+La configuración común está en `snapstock-mode.json`. `UseLocal` indica el entorno
+activo y las URLs se mantienen separadas de las credenciales.
 
-La app usa JWT, guarda el token en el almacén cifrado de Android y ya no accede a
-Supabase. La API se puede cambiar con `SNAPSTOCK_API_URL` al compilar.
+Abra PowerShell como administrador en la raíz y ejecute uno de estos accesos:
 
-### SnapStock API
+```powershell
+.\api local.ps1
+.\api publica.ps1
+.\apk local.ps1
+.\apk publica.ps1
+```
 
-API ASP.NET Core 8 ubicada en `SnapStockApi`.
+Los scripts equivalentes con nombres sin espacios viven en `scripts`.
 
-- Autenticación JWT y autorización por roles.
-- Contraseñas nuevas con PBKDF2.
-- Migración de contraseñas antiguas al primer login correcto.
-- Límite de intentos de login.
-- Validación de cantidad, tamaño, tipo y firma de imágenes.
-- Errores internos registrados en el servidor, no expuestos al cliente.
-- Fotografías y configuración persistentes bajo `C:\ProgramData\SnapStockApi`.
-- Inicio automático y recuperación ante fallos mediante Windows Service.
-- Kestrel limitado a `127.0.0.1:5000`; Cloudflare Tunnel publica HTTPS.
+- `api local.ps1` activa local, inicia MySQL/API/Caddy y detiene el túnel si existe.
+- `api publica.ps1` activa pública, inicia MySQL/API y el servicio `cloudflared`.
+- `apk local.ps1` genera una APK para `https://192.168.140.171/api`.
+- `apk publica.ps1` genera una APK para `https://api.jahmantencion.cl/api`.
 
-## Entregables
+## APK comprobadas
 
-- API autónoma: `SnapStockApi\artifacts\SnapStockApi-win-x64.zip`.
-- Carpeta publicada: `SnapStockApi\artifacts\publish`.
-- Instalador del servicio dentro del ZIP: `deploy-windows-service.ps1`.
-- APK de prueba: `SnapStockQR 3.0.0\build\app\outputs\apk\release\SnapStockQR_v3_0_0_TEST_DEBUG_SIGNED.apk`.
+- `SnapStockQR 3.0.0\build\app\outputs\flutter-apk\app-local-release.apk`
+- `SnapStockQR 3.0.0\build\app\outputs\flutter-apk\app-public-release.apk`
 
-El APK está firmado para pruebas. Para distribución oficial se debe configurar una
-clave propia mediante `SnapStockQR 3.0.0\android\key.properties.example`.
+El flavor local usa el paquete `com.example.foto_catalogo.local`, se muestra como
+`SnapStock QR Local` y confía en la CA privada de esta instalación de Caddy. El
+flavor público mantiene `com.example.foto_catalogo` y sólo confía en autoridades
+públicas del sistema. Ambos se pueden instalar simultáneamente.
 
-## Despliegue pendiente en el PC servidor
+`flutter analyze` y `flutter test` terminan correctamente. Las APK fueron compiladas
+en release para ARM, ARM64 y x86_64. Para distribución oficial todavía se recomienda
+configurar y respaldar una clave Android propia.
 
-1. Rotar la credencial MySQL antigua.
-2. Ampliar la columna de contraseñas:
+## Cloudflare Tunnel
 
-   ```sql
-   ALTER TABLE perfiles MODIFY COLUMN password VARCHAR(512) NOT NULL;
-   ```
+`api.jahmantencion.cl` ya es una aplicación publicada del túnel existente. No se
+debe cambiar por un registro A hacia `152.230.114.194` mientras se conserve el
+túnel. En Cloudflare, el servicio de origen de esa ruta debe ser
+`http://127.0.0.1:5000`.
 
-3. Copiar y descomprimir `SnapStockApi-win-x64.zip` en el PC servidor.
-4. Abrir PowerShell como administrador dentro de la carpeta descomprimida.
-5. Ejecutar:
+El ejecutable `cloudflared` está instalado, pero el túnel sigue sin registrarse en
+esta VM porque falta el token completo. Para agregar esta máquina como réplica:
 
-   ```powershell
-   $conexion = Read-Host 'Connection string MySQL' -AsSecureString
-   .\deploy-windows-service.ps1 -DatabaseConnectionString $conexion
-   ```
+```powershell
+$token = Read-Host 'Token del túnel de Cloudflare' -AsSecureString
+.\api publica.ps1 -TunnelToken $token
+```
 
-6. Confirmar que Cloudflare Tunnel apunta a `http://127.0.0.1:5000` y también tiene
-   inicio automático.
-7. Verificar `https://api.jahmantencion.cl/api/Registros/test`.
-8. Instalar primero el APK de prueba y validar login, fotos, QR e impresión.
-9. Crear y respaldar la clave Android definitiva antes de distribuir oficialmente.
-
-## Validaciones completadas
-
-- API: compilación Release sin errores ni advertencias.
-- API: NuGet sin vulnerabilidades conocidas reportadas.
-- API local: `/test` devuelve 200 y rutas protegidas devuelven 401 sin token.
-- App: `flutter analyze` sin observaciones.
-- App: prueba de interfaz aprobada.
-- App: APK release de prueba compilado e iniciado en Android 16 sin excepciones.
-- Código y artefactos: sin la credencial MySQL anterior ni referencias a Supabase.
-- Servicio remoto: detenido; el dominio devuelve 502 mientras el origen está apagado.
-
-No se probó el login real ni operaciones de escritura contra la nueva API porque el
-servicio productivo está detenido y aún no se ha instalado esta versión en el otro PC.
+El token es un secreto: no debe guardarse en el repositorio ni pegarse en capturas.
+Una vez registrado, Cloudflare inicia el conector como servicio de Windows y no es
+necesario abrir ni redirigir el puerto 443 público hacia esta VM.

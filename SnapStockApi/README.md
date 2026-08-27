@@ -68,3 +68,34 @@ Copie `appsettings.Production.example.json` a una ubicación segura o use variab
 - `Storage__PublicBaseUrl`
 
 Nunca guarde credenciales reales dentro del repositorio ni de `appsettings.json`.
+
+## Modos local y público
+
+El archivo raíz `snapstock-mode.json` contiene las URLs de ambos entornos y el
+indicador `UseLocal`. No contiene secretos. Los scripts de la carpeta raíz
+`scripts` cambian el modo y levantan los componentes necesarios:
+
+- `api-local.ps1`: activa la URL local, inicia MySQL/API/Caddy y detiene el túnel.
+- `api-public.ps1`: activa la URL pública e inicia el conector `cloudflared`.
+- `apk-local.ps1`: compila el sabor Android local, que confía solo en la CA local incluida.
+- `apk-public.ps1`: compila el sabor público usando únicamente certificados del sistema.
+
+La configuración secreta de producción continúa separada en
+`C:\ProgramData\SnapStockApi\appsettings.Production.json`. El modo activo se copia
+a `C:\ProgramData\SnapStockApi\deployment-mode.json`.
+
+## Base de datos nueva en Windows
+
+El directorio `database` contiene el esquema mínimo requerido por la API y una
+configuración de MySQL limitada a `127.0.0.1:3306`:
+
+- `schema.sql` crea las tablas `perfiles` y `registros`, sus restricciones e índices.
+- `my.ini` conserva los datos en `C:\ProgramData\SnapStockMySQL\data`.
+- `bootstrap-local.ps1` genera credenciales aleatorias, crea el usuario técnico
+  `snapstock_api` con permisos limitados y un administrador inicial para la app.
+
+`bootstrap-local.ps1` es únicamente para una instancia MySQL recién inicializada y
+se niega a ejecutarse si ya existe el archivo de credenciales. Las credenciales se
+guardan fuera del repositorio en
+`C:\ProgramData\SnapStockApi\initial-credentials.txt` con acceso limitado a
+`SYSTEM` y administradores.

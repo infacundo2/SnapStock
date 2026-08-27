@@ -37,6 +37,20 @@ android {
         versionName = "3.0.0" 
     }
 
+    flavorDimensions += "environment"
+    productFlavors {
+        create("local") {
+            dimension = "environment"
+            applicationIdSuffix = ".local"
+            versionNameSuffix = "-local"
+            resValue("string", "app_name", "SnapStock QR Local")
+        }
+        create("public") {
+            dimension = "environment"
+            resValue("string", "app_name", "SnapStock QR")
+        }
+    }
+
     signingConfigs {
         if (hasReleaseKey) {
             create("release") {
@@ -64,11 +78,12 @@ android {
             val output = this
             if (output is com.android.build.gradle.internal.api.ApkVariantOutputImpl) {
                 val abiFilter = output.filters.find { it.filterType == "ABI" }?.identifier
+                val flavorSuffix = variant.flavorName.uppercase()
                 val signingSuffix = if (hasReleaseKey) "" else "_TEST_DEBUG_SIGNED"
                 val newName = if (abiFilter != null) {
-                    "SnapStockQR_v3_0_0_${abiFilter}${signingSuffix}.apk"
+                    "SnapStockQR_v3_0_0_${flavorSuffix}_${abiFilter}${signingSuffix}.apk"
                 } else {
-                    "SnapStockQR_v3_0_0${signingSuffix}.apk"
+                    "SnapStockQR_v3_0_0_${flavorSuffix}${signingSuffix}.apk"
                 }
                 output.outputFileName = newName
             }

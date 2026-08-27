@@ -26,6 +26,10 @@ builder.Configuration.AddJsonFile(
     Path.Combine(dataRoot, "appsettings.Production.json"),
     optional: true,
     reloadOnChange: true);
+builder.Configuration.AddJsonFile(
+    Path.Combine(dataRoot, "deployment-mode.json"),
+    optional: true,
+    reloadOnChange: true);
 
 var connectionString = builder.Configuration.GetConnectionString("SnapStock");
 if (string.IsNullOrWhiteSpace(connectionString))

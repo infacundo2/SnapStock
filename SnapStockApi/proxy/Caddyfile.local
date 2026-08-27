@@ -1,0 +1,30 @@
+{
+	admin 127.0.0.1:2019
+	auto_https disable_redirects
+}
+
+https://192.168.140.171, https://localhost, https://api.jahmantencion.cl {
+	tls internal {
+		protocols tls1.2 tls1.3
+		key_type rsa2048
+		ciphers TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256 TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384 TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA
+	}
+	bind 0.0.0.0
+	encode zstd gzip
+
+	header {
+		X-Content-Type-Options nosniff
+		Referrer-Policy no-referrer
+		-Server
+	}
+
+	reverse_proxy 127.0.0.1:5000
+
+	log {
+		output file C:/ProgramData/Caddy/logs/access.log {
+			roll_size 10MiB
+			roll_keep 5
+			roll_keep_for 168h
+		}
+	}
+}

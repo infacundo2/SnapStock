@@ -1,0 +1,7 @@
+﻿{
+    "UseLocal":  false,
+    "LocalApiUrl":  "https://192.168.140.171/api",
+    "PublicApiUrl":  "https://api.jahmantencion.cl/api",
+    "LocalPublicBaseUrl":  "https://192.168.140.171",
+    "PublicPublicBaseUrl":  "https://api.jahmantencion.cl"
+}

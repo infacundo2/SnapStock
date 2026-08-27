@@ -16,6 +16,9 @@
   </ItemGroup>
 
   <ItemGroup>
+    <None Include="..\snapstock-mode.json" Link="snapstock-mode.json">
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </None>
     <None Update="scripts\deploy-windows-service.ps1">
       <TargetPath>deploy-windows-service.ps1</TargetPath>
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>

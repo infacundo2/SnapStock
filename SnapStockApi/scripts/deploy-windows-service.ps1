@@ -18,12 +18,42 @@ $projectRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $dataRoot = Join-Path $env:ProgramData 'SnapStockApi'
 $photosPath = Join-Path $dataRoot 'fotos'
 $configPath = Join-Path $dataRoot 'appsettings.Production.json'
+$modePath = Join-Path $dataRoot 'deployment-mode.json'
 $stagingPath = Join-Path ([IO.Path]::GetTempPath()) ("SnapStockApi-" + [Guid]::NewGuid().ToString('N'))
 $publishedExecutable = Join-Path $PSScriptRoot 'SnapStockApi.exe'
 $runningFromPublishedPackage = Test-Path -LiteralPath $publishedExecutable
+$modeTemplatePath = if ($runningFromPublishedPackage) {
+    Join-Path $PSScriptRoot 'snapstock-mode.json'
+}
+else {
+    Join-Path (Split-Path $projectRoot -Parent) 'snapstock-mode.json'
+}
+
+function Set-RestrictedDirectoryPermissions([string]$Path) {
+    & icacls.exe `
+        $Path `
+        '/inheritance:r' `
+        '/grant:r' `
+        '*S-1-5-18:(OI)(CI)F' `
+        '*S-1-5-32-544:(OI)(CI)F' `
+        '/C' | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "No fue posible restringir los permisos de $Path."
+    }
+
+    if (Get-ChildItem -LiteralPath $Path -Force -ErrorAction SilentlyContinue |
+        Select-Object -First 1) {
+        & icacls.exe (Join-Path $Path '*') '/reset' '/T' '/C' | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            throw "No fue posible propagar los permisos dentro de $Path."
+        }
+    }
+}
 
 New-Item -ItemType Directory -Path $InstallPath -Force | Out-Null
 New-Item -ItemType Directory -Path $photosPath -Force | Out-Null
+Set-RestrictedDirectoryPermissions $InstallPath
+Set-RestrictedDirectoryPermissions $dataRoot
 if (-not $runningFromPublishedPackage) {
     New-Item -ItemType Directory -Path $stagingPath -Force | Out-Null
 }
@@ -79,6 +109,12 @@ $configuration = [ordered]@{
 }
 
 $configuration | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $configPath -Encoding UTF8
+if (-not (Test-Path -LiteralPath $modePath)) {
+    if (-not (Test-Path -LiteralPath $modeTemplatePath)) {
+        throw "No se encontró la configuración de modo: $modeTemplatePath"
+    }
+    Copy-Item -LiteralPath $modeTemplatePath -Destination $modePath
+}
 $acl = Get-Acl -LiteralPath $configPath
 $acl.SetAccessRuleProtection($true, $false)
 $systemAccount = [Security.Principal.SecurityIdentifier]::new('S-1-5-18').Translate(
@@ -90,6 +126,7 @@ $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
 $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
     $administratorsAccount, 'FullControl', 'Allow'))
 Set-Acl -LiteralPath $configPath -AclObject $acl
+Set-Acl -LiteralPath $modePath -AclObject $acl
 
 $legacyPhotos = Join-Path $InstallPath 'wwwroot\fotos'
 if (Test-Path -LiteralPath $legacyPhotos) {
@@ -136,9 +173,11 @@ if (-not $service) {
         -StartupType Automatic
 }
 else {
-    & sc.exe config $ServiceName "binPath= $binaryPath" start= auto | Out-Null
+    $serviceRegistryPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$ServiceName"
+    Set-ItemProperty -LiteralPath $serviceRegistryPath -Name ImagePath -Value $binaryPath
 }
 
+& sc.exe config $ServiceName start= delayed-auto | Out-Null
 & sc.exe failure $ServiceName reset= 86400 actions= restart/5000/restart/15000/restart/60000 | Out-Null
 & sc.exe failureflag $ServiceName 1 | Out-Null
 Start-Service -Name $ServiceName

@@ -22,6 +22,19 @@ flutter build apk --release `
   --dart-define=SNAPSTOCK_API_URL=https://api.ejemplo.cl/api
 ```
 
+El repositorio incluye dos sabores Android y scripts en la carpeta raíz:
+
+```powershell
+.\scripts\apk-local.ps1
+.\scripts\apk-public.ps1
+```
+
+El sabor `local` usa `https://192.168.140.171/api` y confía en la CA privada de
+esta instalación de Caddy. El sabor `public` usa
+`https://api.jahmantencion.cl/api` y confía solamente en autoridades públicas del
+sistema. Los identificadores de paquete son distintos, por lo que ambas APK se
+pueden instalar simultáneamente durante las pruebas.
+
 Para una entrega oficial, copie `android/key.properties.example` como
 `android/key.properties` y configure una clave de firma que esté respaldada. Si no
 existe, el proyecto compila deliberadamente un APK llamado `*_TEST_DEBUG_SIGNED.apk`;

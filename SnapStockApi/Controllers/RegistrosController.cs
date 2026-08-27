@@ -19,6 +19,8 @@ public sealed class RegistrosController : ControllerBase
     private readonly string _connectionString;
     private readonly string _photosPath;
     private readonly string _publicBaseUrl;
+    private readonly HashSet<string> _managedPhotoAuthorities;
+    private readonly string _deploymentMode;
     private readonly PasswordService _passwords;
     private readonly TokenService _tokens;
     private readonly ILogger<RegistrosController> _logger;
@@ -38,8 +40,21 @@ public sealed class RegistrosController : ControllerBase
                 "SnapStockApi",
                 "fotos")
             : Path.GetFullPath(configuredPhotosPath);
-        _publicBaseUrl = (configuration["Storage:PublicBaseUrl"]
+        var useLocal = configuration.GetValue("UseLocal", false);
+        var localBaseUrl = (configuration["LocalPublicBaseUrl"]
+            ?? "https://192.168.140.171").TrimEnd('/');
+        var publicBaseUrl = (configuration["PublicPublicBaseUrl"]
+            ?? configuration["Storage:PublicBaseUrl"]
             ?? "https://api.jahmantencion.cl").TrimEnd('/');
+        _publicBaseUrl = useLocal ? localBaseUrl : publicBaseUrl;
+        _deploymentMode = useLocal ? "local" : "public";
+        _managedPhotoAuthorities = new[] { localBaseUrl, publicBaseUrl }
+            .Select(value => Uri.TryCreate(value, UriKind.Absolute, out var uri)
+                ? uri.Authority
+                : null)
+            .Where(value => !string.IsNullOrWhiteSpace(value))
+            .Cast<string>()
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
         _passwords = passwords;
         _tokens = tokens;
         _logger = logger;
@@ -51,7 +66,9 @@ public sealed class RegistrosController : ControllerBase
     public IActionResult Test() => Ok(new
     {
         message = "SnapStock API v3.0.0 disponible",
-        fecha = DateTimeOffset.UtcNow
+        fecha = DateTimeOffset.UtcNow,
+        mode = _deploymentMode,
+        publicBaseUrl = _publicBaseUrl
     });
 
     [Authorize(Roles = "Admin")]
@@ -214,6 +231,7 @@ public sealed class RegistrosController : ControllerBase
         var retainedUrls = (foto_paths ?? string.Empty)
             .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
             .Where(IsManagedPhotoUrl)
+            .Select(ToCurrentManagedPhotoUrl)
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
         var newUrls = new List<string>();
@@ -263,6 +281,7 @@ public sealed class RegistrosController : ControllerBase
                 previousUrls = previous
                     .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
                     .Where(IsManagedPhotoUrl)
+                    .Select(ToCurrentManagedPhotoUrl)
                     .ToList();
             }
 
@@ -549,7 +568,7 @@ public sealed class RegistrosController : ControllerBase
 
     private MySqlConnection CreateConnection() => new(_connectionString);
 
-    private static object ReadRecord(DbDataReader reader) => new
+    private object ReadRecord(DbDataReader reader) => new
     {
         id = reader["id"],
         uuid = reader["uuid"],
@@ -557,20 +576,35 @@ public sealed class RegistrosController : ControllerBase
         fecha = reader["fecha"],
         observaciones = reader["observaciones"],
         categoria = reader["categoria"],
-        foto_paths = reader["foto_paths"]
+        foto_paths = NormalizePhotoPaths(reader["foto_paths"]?.ToString() ?? string.Empty)
     };
 
     private bool IsManagedPhotoUrl(string value)
     {
-        if (!Uri.TryCreate(value, UriKind.Absolute, out var candidate) ||
-            !Uri.TryCreate(_publicBaseUrl, UriKind.Absolute, out var official))
+        if (!Uri.TryCreate(value, UriKind.Absolute, out var candidate))
         {
             return false;
         }
 
         return candidate.Scheme == Uri.UriSchemeHttps &&
-               candidate.Host.Equals(official.Host, StringComparison.OrdinalIgnoreCase) &&
+               _managedPhotoAuthorities.Contains(candidate.Authority) &&
                candidate.AbsolutePath.StartsWith("/fotos/", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private string ToCurrentManagedPhotoUrl(string value)
+    {
+        return Uri.TryCreate(value, UriKind.Absolute, out var parsed)
+            ? $"{_publicBaseUrl}{parsed.AbsolutePath}"
+            : value;
+    }
+
+    private string NormalizePhotoPaths(string value)
+    {
+        return string.Join(',', value
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Where(IsManagedPhotoUrl)
+            .Select(ToCurrentManagedPhotoUrl)
+            .Distinct(StringComparer.OrdinalIgnoreCase));
     }
 
     private static string? GetSafeImageExtension(IFormFile file)
