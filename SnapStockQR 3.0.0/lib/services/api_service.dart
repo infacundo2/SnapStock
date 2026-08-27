@@ -129,7 +129,11 @@ class ApiService {
 
       for (final foto in fotosNuevas) {
         request.files.add(
-          await http.MultipartFile.fromPath('fotos', foto.path),
+          await http.MultipartFile.fromPath(
+            'fotos',
+            foto.path,
+            contentType: _imageContentType(foto.path),
+          ),
         );
       }
 
@@ -149,6 +153,17 @@ class ApiService {
     } catch (_) {
       throw const ApiException('No fue posible guardar el registro.');
     }
+  }
+
+  static http.MediaType _imageContentType(String path) {
+    final extension =
+        path.split(RegExp(r'[/\\]')).last.split('.').last.toLowerCase();
+    return switch (extension) {
+      'jpg' || 'jpeg' => http.MediaType('image', 'jpeg'),
+      'png' => http.MediaType('image', 'png'),
+      'webp' => http.MediaType('image', 'webp'),
+      _ => http.MediaType('application', 'octet-stream'),
+    };
   }
 
   static Future<bool> eliminar(String uuid) async {

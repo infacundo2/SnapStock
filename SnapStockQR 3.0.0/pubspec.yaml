@@ -2,7 +2,7 @@ name: foto_catalogo
 description: "Inventario corporativo con fotografías, consulta QR y etiquetas ZPL."
 publish_to: 'none'
 
-version: 3.0.0+1
+version: 3.0.1+2
 
 environment:
   sdk: '>=3.0.0 <4.0.0'

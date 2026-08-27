@@ -609,11 +609,27 @@ public sealed class RegistrosController : ControllerBase
 
     private static string? GetSafeImageExtension(IFormFile file)
     {
-        return file.ContentType.ToLowerInvariant() switch
+        var contentTypeExtension = file.ContentType.ToLowerInvariant() switch
         {
             "image/jpeg" or "image/jpg" => ".jpg",
             "image/png" => ".png",
             "image/webp" => ".webp",
+            _ => null
+        };
+
+        if (contentTypeExtension is not null)
+        {
+            return contentTypeExtension;
+        }
+
+        // Algunos clientes Android envían fotos válidas como
+        // application/octet-stream. La extensión sólo selecciona la firma que
+        // se comprobará después; nunca se confía en ella por sí sola.
+        return Path.GetExtension(file.FileName).ToLowerInvariant() switch
+        {
+            ".jpg" or ".jpeg" => ".jpg",
+            ".png" => ".png",
+            ".webp" => ".webp",
             _ => null
         };
     }
