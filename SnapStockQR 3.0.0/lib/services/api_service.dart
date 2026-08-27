@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -26,6 +27,7 @@ class ApiService {
   );
   static const Duration _shortTimeout = Duration(seconds: 15);
   static const Duration _uploadTimeout = Duration(seconds: 60);
+  static final http.Client _client = http.Client();
   static const FlutterSecureStorage _secureStorage = FlutterSecureStorage(
     aOptions: AndroidOptions(migrateWithBackup: true),
   );
@@ -91,7 +93,7 @@ class ApiService {
 
   static Future<List<Registro>> obtenerTodos() async {
     final response = await _send(
-      () async => http
+      () async => _client
           .get(
             Uri.parse('$baseUrl/Registros'),
             headers: await _authorizedHeaders(),
@@ -100,13 +102,16 @@ class ApiService {
       action: 'cargar el inventario',
     );
     _requireSuccess(response);
-    final data = jsonDecode(response.body) as List<dynamic>;
+    final data = _decodeList(response);
     return data
         .map((item) => Registro.fromMap(item as Map<String, dynamic>))
         .toList();
   }
 
-  static Future<bool> guardar(Registro registro, List<File> fotosNuevas) async {
+  static Future<String> guardar(
+    Registro registro,
+    List<File> fotosNuevas,
+  ) async {
     try {
       final request = http.MultipartRequest(
         'POST',
@@ -131,11 +136,16 @@ class ApiService {
       final streamed = await request.send().timeout(_uploadTimeout);
       final response = await http.Response.fromStream(streamed);
       _requireSuccess(response);
-      return true;
+      final body = _decodeObject(response);
+      return body['paths']?.toString() ?? registro.fotoPaths;
     } on ApiException {
       rethrow;
     } on SocketException {
       throw const ApiException('No hay conexión con el servidor.');
+    } on TimeoutException {
+      throw const ApiException(
+        'La carga está tardando demasiado. Revise la conexión e inténtelo nuevamente.',
+      );
     } catch (_) {
       throw const ApiException('No fue posible guardar el registro.');
     }
@@ -143,7 +153,7 @@ class ApiService {
 
   static Future<bool> eliminar(String uuid) async {
     final response = await _send(
-      () async => http
+      () async => _client
           .delete(
             Uri.parse('$baseUrl/Registros/eliminar/$uuid'),
             headers: await _authorizedHeaders(),
@@ -157,7 +167,7 @@ class ApiService {
 
   static Future<Registro?> buscarPorUuid(String uuid) async {
     final response = await _send(
-      () async => http
+      () async => _client
           .get(
             Uri.parse('$baseUrl/Registros/$uuid'),
             headers: await _authorizedHeaders(),
@@ -167,7 +177,7 @@ class ApiService {
     );
     if (response.statusCode == 404) return null;
     _requireSuccess(response);
-    return Registro.fromMap(jsonDecode(response.body) as Map<String, dynamic>);
+    return Registro.fromMap(_decodeObject(response));
   }
 
   static Future<Map<String, dynamic>?> login(
@@ -175,7 +185,7 @@ class ApiService {
     String password,
   ) async {
     final response = await _send(
-      () => http.post(
+      () => _client.post(
         Uri.parse('$baseUrl/Registros/login'),
         body: {'nombre': nombre, 'password': password},
       ).timeout(_shortTimeout),
@@ -183,12 +193,12 @@ class ApiService {
     );
     if (response.statusCode == 401) return null;
     _requireSuccess(response);
-    return jsonDecode(response.body) as Map<String, dynamic>;
+    return _decodeObject(response);
   }
 
   static Future<List<dynamic>> obtenerUsuarios() async {
     final response = await _send(
-      () async => http
+      () async => _client
           .get(
             Uri.parse('$baseUrl/Registros/usuarios'),
             headers: await _authorizedHeaders(),
@@ -197,7 +207,7 @@ class ApiService {
       action: 'cargar los usuarios',
     );
     _requireSuccess(response);
-    return jsonDecode(response.body) as List<dynamic>;
+    return _decodeList(response);
   }
 
   static Future<bool> crearUsuario(
@@ -206,7 +216,7 @@ class ApiService {
     int tipo,
   ) async {
     final response = await _send(
-      () async => http.post(
+      () async => _client.post(
         Uri.parse('$baseUrl/Registros/usuarios/crear'),
         headers: await _authorizedHeaders(),
         body: {
@@ -223,7 +233,7 @@ class ApiService {
 
   static Future<bool> eliminarUsuario(int id) async {
     final response = await _send(
-      () async => http
+      () async => _client
           .delete(
             Uri.parse('$baseUrl/Registros/usuarios/$id'),
             headers: await _authorizedHeaders(),
@@ -237,7 +247,7 @@ class ApiService {
 
   static Future<List<String>> obtenerCategorias() async {
     final response = await _send(
-      () async => http
+      () async => _client
           .get(
             Uri.parse('$baseUrl/Registros/categorias'),
             headers: await _authorizedHeaders(),
@@ -246,7 +256,7 @@ class ApiService {
       action: 'cargar las categorías',
     );
     _requireSuccess(response);
-    final data = jsonDecode(response.body) as List<dynamic>;
+    final data = _decodeList(response);
     return data.map((item) => item.toString()).toList();
   }
 
@@ -281,6 +291,10 @@ class ApiService {
       rethrow;
     } on SocketException {
       throw const ApiException('No hay conexión con el servidor.');
+    } on TimeoutException {
+      throw ApiException(
+        'El servidor tardó demasiado en responder al intentar $action.',
+      );
     } on HttpException {
       throw ApiException('No fue posible $action.');
     } catch (_) {
@@ -323,6 +337,26 @@ class ApiService {
       // La respuesta no es JSON; se usa un mensaje neutro.
     }
     return 'El servidor rechazó la operación.';
+  }
+
+  static Map<String, dynamic> _decodeObject(http.Response response) {
+    try {
+      final value = jsonDecode(response.body);
+      if (value is Map<String, dynamic>) return value;
+    } catch (_) {
+      // Se transforma en un error estable para la interfaz.
+    }
+    throw const ApiException('El servidor devolvió una respuesta no válida.');
+  }
+
+  static List<dynamic> _decodeList(http.Response response) {
+    try {
+      final value = jsonDecode(response.body);
+      if (value is List<dynamic>) return value;
+    } catch (_) {
+      // Se transforma en un error estable para la interfaz.
+    }
+    throw const ApiException('El servidor devolvió una lista no válida.');
   }
 
   static int _asInt(dynamic value) {

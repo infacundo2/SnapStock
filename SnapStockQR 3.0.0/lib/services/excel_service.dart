@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'package:intl/intl.dart';
 import 'package:excel/excel.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
@@ -6,24 +7,24 @@ import '../models/registro_model.dart';
 
 class ExcelService {
   static Future<void> exportarRegistros(List<Registro> registros) async {
-    var excel = Excel.createExcel();
-    Sheet sheetObject = excel['Inventario'];
+    final excel = Excel.createExcel();
+    final sheetObject = excel['Inventario'];
     excel.delete('Sheet1');
 
-    CellStyle headerStyle = CellStyle(
-      backgroundColorHex: ExcelColor.fromHexString("#4F81BD"),
+    final headerStyle = CellStyle(
+      backgroundColorHex: ExcelColor.fromHexString("#B7262E"),
       fontColorHex: ExcelColor.fromHexString("#FFFFFF"),
       bold: true,
       fontFamily: getFontFamily(FontFamily.Arial),
     );
 
     // CORRECCIÓN: Usando la propiedad correcta para ajustar texto
-    CellStyle wrapStyle = CellStyle(
+    final wrapStyle = CellStyle(
       textWrapping: TextWrapping.WrapText,
       verticalAlign: VerticalAlign.Top,
     );
 
-    List<String> headers = [
+    const headers = [
       "UUID",
       "Nombre",
       "Categoría",
@@ -32,7 +33,7 @@ class ExcelService {
       "Num. Fotos",
     ];
     for (var i = 0; i < headers.length; i++) {
-      var cell = sheetObject.cell(
+      final cell = sheetObject.cell(
         CellIndex.indexByColumnRow(columnIndex: i, rowIndex: 0),
       );
       cell.value = TextCellValue(headers[i]);
@@ -40,8 +41,8 @@ class ExcelService {
     }
 
     for (var i = 0; i < registros.length; i++) {
-      var reg = registros[i];
-      int row = i + 1;
+      final reg = registros[i];
+      final row = i + 1;
 
       sheetObject
           .cell(CellIndex.indexByColumnRow(columnIndex: 0, rowIndex: row))
@@ -64,7 +65,7 @@ class ExcelService {
         reg.fecha,
       );
 
-      var obsCell = sheetObject.cell(
+      final obsCell = sheetObject.cell(
         CellIndex.indexByColumnRow(columnIndex: 4, rowIndex: row),
       );
       obsCell.value = TextCellValue(reg.observaciones);
@@ -75,17 +76,23 @@ class ExcelService {
           .value = IntCellValue(
         reg.listaFotos.length,
       );
-
-      sheetObject.setColumnWidth(4, 40.0);
     }
 
-    var fileBytes = excel.save();
+    sheetObject.setColumnWidth(0, 38);
+    sheetObject.setColumnWidth(1, 28);
+    sheetObject.setColumnWidth(2, 20);
+    sheetObject.setColumnWidth(3, 20);
+    sheetObject.setColumnWidth(4, 44);
+    sheetObject.setColumnWidth(5, 12);
+
+    final fileBytes = excel.save();
     if (fileBytes == null) return;
 
     final directory = await getTemporaryDirectory();
-    final filePath = "${directory.path}/Inventario_SnapStockQR.xlsx";
+    final stamp = DateFormat('yyyyMMdd_HHmmss').format(DateTime.now());
+    final filePath = "${directory.path}/Inventario_SnapStock_$stamp.xlsx";
     final file = File(filePath);
-    await file.writeAsBytes(fileBytes);
+    await file.writeAsBytes(fileBytes, flush: true);
 
     await Share.shareXFiles([
       XFile(filePath),

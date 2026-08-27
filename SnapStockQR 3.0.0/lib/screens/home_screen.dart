@@ -1,14 +1,20 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+import '../database/db_helper.dart';
 import '../models/registro_model.dart';
 import '../services/api_service.dart';
 import '../services/excel_service.dart';
 import '../services/printer_picker.dart';
-import 'formulario_screen.dart';
+import '../ui/app_theme.dart';
+import '../widgets/app_components.dart';
 import 'detalle_screen.dart';
+import 'diseno_etiqueta_screen.dart';
+import 'formulario_screen.dart';
 import 'scanner_screen.dart';
 import 'usuarios_screen.dart';
-import 'diseno_etiqueta_screen.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 
 class HomeScreen extends StatefulWidget {
   final bool esAdmin;
@@ -25,127 +31,188 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> {
-  List<Registro> registros = [];
-  List<Registro> registrosFiltrados = [];
-  String filtroBusqueda = "";
-  bool modoSeleccion = false;
-  Set<int> idsSeleccionados = {};
+  final _searchController = TextEditingController();
+  List<Registro> _registros = const [];
+  List<Registro> _filtrados = const [];
+  final Set<String> _seleccionados = {};
+  final Set<String> _eliminando = {};
   bool _cargando = true;
-  String _userName = "Usuario";
+  bool _sinConexion = false;
+  bool _buscandoRegistro = false;
+  String? _errorCarga;
+  String _userName = 'Usuario';
+
+  bool get _modoSeleccion => _seleccionados.isNotEmpty;
 
   @override
   void initState() {
     super.initState();
+    _searchController.addListener(_aplicarFiltro);
     if (widget.esAdmin) {
       _cargarDatos();
     } else {
       _cargando = false;
     }
     _obtenerInfoUsuario();
-    if (widget.initialRegistroUuid != null) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        _abrirRegistroPorUuid(widget.initialRegistroUuid!);
-      });
+    final pendingUuid = widget.initialRegistroUuid;
+    if (pendingUuid != null && pendingUuid.isNotEmpty) {
+      WidgetsBinding.instance.addPostFrameCallback(
+        (_) => _abrirRegistroPorUuid(pendingUuid),
+      );
     }
+  }
+
+  @override
+  void dispose() {
+    _searchController.dispose();
+    super.dispose();
   }
 
   Future<void> _obtenerInfoUsuario() async {
     final prefs = await SharedPreferences.getInstance();
-    if (!mounted) return;
-    setState(() {
-      _userName = prefs.getString('userName') ?? "Usuario";
-    });
+    if (mounted) {
+      setState(() => _userName = prefs.getString('userName') ?? 'Usuario');
+    }
   }
 
   Future<void> _cargarDatos() async {
     if (!widget.esAdmin) return;
-    setState(() => _cargando = true);
+    setState(() {
+      _cargando = true;
+      _errorCarga = null;
+    });
     try {
       final lista = await ApiService.obtenerTodos();
+      await DbHelper.reemplazarTodos(lista);
       if (!mounted) return;
       setState(() {
-        registros = lista;
-        registrosFiltrados = _filtrar(lista);
+        _registros = lista;
+        _filtrados = _filtrar(lista);
+        _sinConexion = false;
         _cargando = false;
       });
     } on ApiException catch (error) {
       if (!mounted) return;
-      setState(() => _cargando = false);
-      await _handleApiError(error);
+      if (error.isUnauthorized) {
+        setState(() => _cargando = false);
+        await _handleApiError(error);
+        return;
+      }
+
+      final cache = await DbHelper.obtenerTodos();
+      if (!mounted) return;
+      setState(() {
+        _registros = cache;
+        _filtrados = _filtrar(cache);
+        _sinConexion = true;
+        _errorCarga = error.message;
+        _cargando = false;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _cargando = false;
+        _errorCarga = 'No fue posible leer el inventario guardado.';
+      });
     }
   }
 
   void _aplicarFiltro() {
+    if (!mounted) return;
     setState(() {
-      registrosFiltrados = _filtrar(registros);
+      _filtrados = _filtrar(_registros);
+      _seleccionados.removeWhere(
+        (uuid) => !_filtrados.any((item) => item.uuid == uuid),
+      );
     });
   }
 
   List<Registro> _filtrar(List<Registro> source) {
-    final query = filtroBusqueda.toLowerCase();
+    final query = _searchController.text.trim().toLowerCase();
+    if (query.isEmpty) return List<Registro>.of(source);
     return source.where((record) {
       return record.nombre.toLowerCase().contains(query) ||
           record.categoria.toLowerCase().contains(query) ||
-          record.observaciones.toLowerCase().contains(query);
-    }).toList();
+          record.observaciones.toLowerCase().contains(query) ||
+          record.uuid.toLowerCase().contains(query);
+    }).toList(growable: false);
   }
 
-  void _toggleSeleccion(int id) {
+  void _toggleSeleccion(String uuid) {
     if (!widget.esAdmin) return;
     setState(() {
-      if (idsSeleccionados.contains(id)) {
-        idsSeleccionados.remove(id);
-        if (idsSeleccionados.isEmpty) modoSeleccion = false;
-      } else {
-        idsSeleccionados.add(id);
-        modoSeleccion = true;
-      }
+      if (!_seleccionados.add(uuid)) _seleccionados.remove(uuid);
     });
   }
 
   void _seleccionarTodos() {
     setState(() {
-      if (idsSeleccionados.length == registrosFiltrados.length) {
-        idsSeleccionados.clear();
-        modoSeleccion = false;
+      if (_filtrados.isNotEmpty && _seleccionados.length == _filtrados.length) {
+        _seleccionados.clear();
       } else {
-        idsSeleccionados = registrosFiltrados
-            .where((record) => record.id != null)
-            .map((record) => record.id!)
-            .toSet();
-        modoSeleccion = true;
+        _seleccionados
+          ..clear()
+          ..addAll(_filtrados.map((record) => record.uuid));
       }
     });
   }
 
+  Future<void> _exportar(List<Registro> registros) async {
+    if (registros.isEmpty) {
+      showAppMessage(context, 'No hay registros para exportar.', error: true);
+      return;
+    }
+    try {
+      await ExcelService.exportarRegistros(registros);
+    } catch (_) {
+      if (mounted) {
+        showAppMessage(
+          context,
+          'No fue posible crear o compartir el archivo Excel.',
+          error: true,
+        );
+      }
+    }
+  }
+
   Future<void> _abrirEscaner() async {
-    final String? resultado = await Navigator.push(
+    final resultado = await Navigator.push<String>(
       context,
       MaterialPageRoute(builder: (_) => const ScannerScreen()),
     );
     if (resultado == null || !mounted) return;
-    final uri = Uri.tryParse(resultado);
+    final uri = Uri.tryParse(resultado.trim());
     final uuid = uri != null &&
             uri.scheme == 'fotocatalogo' &&
             uri.host == 'registro' &&
             uri.pathSegments.isNotEmpty
         ? uri.pathSegments.last
         : null;
-    if (uuid == null) {
-      _showMessage('El código QR no pertenece a SnapStock.');
+    if (uuid == null || uuid.isEmpty) {
+      showAppMessage(
+        context,
+        'El código QR no pertenece a SnapStock.',
+        error: true,
+      );
       return;
     }
     await _abrirRegistroPorUuid(uuid);
   }
 
   Future<void> _abrirRegistroPorUuid(String uuid) async {
+    if (_buscandoRegistro) return;
+    setState(() => _buscandoRegistro = true);
     try {
       final prefs = await SharedPreferences.getInstance();
-      await prefs.remove('pendingRegistroUuid');
       final registro = await ApiService.buscarPorUuid(uuid);
+      await prefs.remove('pendingRegistroUuid');
       if (!mounted) return;
       if (registro == null) {
-        _showMessage('No se encontró el registro en el servidor.');
+        showAppMessage(
+          context,
+          'No se encontró el registro en el servidor.',
+          error: true,
+        );
         return;
       }
       await Navigator.push(
@@ -154,6 +221,8 @@ class _HomeScreenState extends State<HomeScreen> {
       );
     } on ApiException catch (error) {
       if (mounted) await _handleApiError(error);
+    } finally {
+      if (mounted) setState(() => _buscandoRegistro = false);
     }
   }
 
@@ -164,441 +233,659 @@ class _HomeScreenState extends State<HomeScreen> {
       Navigator.pushNamedAndRemoveUntil(context, '/login', (_) => false);
       return;
     }
-    _showMessage(error.message);
+    if (mounted) showAppMessage(context, error.message, error: true);
   }
 
-  void _showMessage(String message) {
-    if (!mounted) return;
-    ScaffoldMessenger.of(
+  Future<void> _abrirFormulario([Registro? registro]) async {
+    final changed = await Navigator.push<bool>(
       context,
-    ).showSnackBar(SnackBar(content: Text(message)));
+      MaterialPageRoute(
+        builder: (_) => FormularioScreen(registroEdicion: registro),
+      ),
+    );
+    if (changed == true) await _cargarDatos();
   }
 
   @override
   Widget build(BuildContext context) {
+    final wide = MediaQuery.sizeOf(context).width >= 700;
     return PopScope(
       canPop: false,
-      onPopInvokedWithResult: (didPop, result) async {
-        if (didPop) return;
-        _confirmarSalida();
+      onPopInvokedWithResult: (didPop, result) {
+        if (!didPop) _confirmarSalida();
       },
       child: Scaffold(
         appBar: AppBar(
-          title: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Text(
-                'SnapStock QR',
-                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
-              ),
-              Text(
-                'v3.0.0',
-                style: TextStyle(
-                  fontSize: 10,
-                  color: Colors.red.shade900,
-                  letterSpacing: 1.2,
+          title: _modoSeleccion
+              ? Text('${_seleccionados.length} seleccionados')
+              : const Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text('SnapStock QR'),
+                    Text(
+                      'Inventario corporativo',
+                      style: TextStyle(
+                        color: AppColors.textMuted,
+                        fontSize: 11,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                  ],
                 ),
-              ),
-            ],
-          ),
           actions: [
-            if (modoSeleccion) ...[
+            if (_modoSeleccion) ...[
               IconButton(
-                icon: Icon(
-                  idsSeleccionados.length == registrosFiltrados.length
-                      ? Icons.deselect
-                      : Icons.select_all,
-                ),
-                tooltip: "Seleccionar todos",
+                tooltip: _seleccionados.length == _filtrados.length
+                    ? 'Quitar selección'
+                    : 'Seleccionar todo',
                 onPressed: _seleccionarTodos,
-              ),
-              IconButton(
-                icon: const Icon(
-                  Icons.file_download,
-                  color: Colors.greenAccent,
+                icon: Icon(
+                  _seleccionados.length == _filtrados.length
+                      ? Icons.deselect_rounded
+                      : Icons.select_all_rounded,
                 ),
-                tooltip: "Exportar marcados",
-                onPressed: () {
-                  final aExportar = registros
-                      .where((r) => idsSeleccionados.contains(r.id))
-                      .toList();
-                  ExcelService.exportarRegistros(aExportar);
-                },
               ),
               IconButton(
-                icon: const Icon(Icons.close),
-                onPressed: () => setState(() {
-                  modoSeleccion = false;
-                  idsSeleccionados.clear();
-                }),
+                tooltip: 'Exportar selección',
+                onPressed: () => _exportar(
+                  _registros
+                      .where((item) => _seleccionados.contains(item.uuid))
+                      .toList(growable: false),
+                ),
+                icon: const Icon(Icons.ios_share_rounded),
+              ),
+              IconButton(
+                tooltip: 'Cancelar selección',
+                onPressed: () => setState(_seleccionados.clear),
+                icon: const Icon(Icons.close_rounded),
               ),
             ],
           ],
-          bottom: widget.esAdmin
-              ? PreferredSize(
-                  preferredSize: const Size.fromHeight(60),
-                  child: Padding(
-                    padding: const EdgeInsets.all(8.0),
-                    child: TextField(
-                      style: const TextStyle(color: Colors.black),
-                      decoration: InputDecoration(
-                        hintText: 'Buscar en servidor...',
-                        hintStyle: const TextStyle(color: Colors.grey),
-                        fillColor: Colors.white,
-                        filled: true,
-                        prefixIcon: const Icon(
-                          Icons.search,
-                          color: Colors.grey,
+        ),
+        drawer: _buildDrawer(),
+        body: SafeArea(
+          top: false,
+          child: Stack(
+            children: [
+              Column(
+                children: [
+                  if (_sinConexion)
+                    AppStatusBanner(
+                      icon: Icons.cloud_off_outlined,
+                      color: AppColors.warning,
+                      message:
+                          'Sin conexión: mostrando la última copia guardada.',
+                      onTap: _cargarDatos,
+                    ),
+                  ContentConstraint(
+                    padding: EdgeInsets.fromLTRB(
+                      wide ? 24 : 16,
+                      14,
+                      wide ? 24 : 16,
+                      12,
+                    ),
+                    child: Column(
+                      children: [
+                        FilledButton.icon(
+                          onPressed: _buscandoRegistro ? null : _abrirEscaner,
+                          icon: const Icon(Icons.qr_code_scanner_rounded),
+                          label: const Text('Escanear código QR'),
+                          style: FilledButton.styleFrom(
+                            minimumSize: const Size.fromHeight(56),
+                          ),
                         ),
-                        border: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(10),
-                          borderSide: BorderSide.none,
-                        ),
-                      ),
-                      onChanged: (v) {
-                        filtroBusqueda = v;
-                        _aplicarFiltro();
-                      },
+                        if (widget.esAdmin) ...[
+                          const SizedBox(height: 12),
+                          TextField(
+                            controller: _searchController,
+                            textInputAction: TextInputAction.search,
+                            decoration: InputDecoration(
+                              hintText: 'Buscar nombre, categoría o UUID',
+                              prefixIcon: const Icon(Icons.search_rounded),
+                              suffixIcon: _searchController.text.isEmpty
+                                  ? null
+                                  : IconButton(
+                                      tooltip: 'Limpiar búsqueda',
+                                      onPressed: _searchController.clear,
+                                      icon: const Icon(Icons.close_rounded),
+                                    ),
+                            ),
+                          ),
+                        ],
+                      ],
                     ),
                   ),
-                )
-              : null,
-        ),
-        drawer: Drawer(
-          backgroundColor: const Color(0xFF121212),
-          child: Column(
-            children: [
-              UserAccountsDrawerHeader(
-                decoration: BoxDecoration(color: Colors.red.shade900),
-                currentAccountPicture: const CircleAvatar(
-                  backgroundColor: Colors.white,
-                  child: Icon(Icons.person, size: 40, color: Colors.black),
-                ),
-                accountName: Text(
-                  _userName,
-                  style: const TextStyle(
-                    fontWeight: FontWeight.bold,
-                    fontSize: 18,
+                  Expanded(
+                    child: widget.esAdmin
+                        ? _buildAdminBody()
+                        : _buildOperatorBody(),
                   ),
-                ),
-                accountEmail: Text(
-                  widget.esAdmin
-                      ? "Administrador de Inventario"
-                      : "Operador de Consulta",
-                ),
+                ],
               ),
-              if (widget.esAdmin) ...[
-                ListTile(
-                  leading: const Icon(Icons.group, color: Colors.white),
-                  title: const Text(
-                    "Gestión de Usuarios",
-                    style: TextStyle(color: Colors.white),
-                  ),
-                  onTap: () {
-                    Navigator.pop(context);
-                    Navigator.push(
-                      context,
-                      MaterialPageRoute(builder: (_) => const UsuariosScreen()),
-                    );
-                  },
-                ),
-                ListTile(
-                  leading: const Icon(Icons.print, color: Colors.white),
-                  title: const Text(
-                    "Configurar Impresora",
-                    style: TextStyle(color: Colors.white),
-                  ),
-                  onTap: () {
-                    Navigator.pop(context);
-                    PrinterPicker.mostrar(context);
-                  },
-                ),
-                ListTile(
-                  leading: const Icon(
-                    Icons.settings_overscan,
-                    color: Colors.white,
-                  ),
-                  title: const Text(
-                    "Diseño de Etiqueta",
-                    style: TextStyle(color: Colors.white),
-                  ),
-                  onTap: () {
-                    Navigator.pop(context);
-                    Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                        builder: (_) => const DisenoEtiquetaScreen(),
+              if (_buscandoRegistro)
+                const Positioned.fill(
+                  child: ColoredBox(
+                    color: Color(0x66000000),
+                    child: Center(
+                      child: Card(
+                        child: Padding(
+                          padding: EdgeInsets.symmetric(
+                            horizontal: 24,
+                            vertical: 18,
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              SizedBox(
+                                width: 22,
+                                height: 22,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2.5,
+                                ),
+                              ),
+                              SizedBox(width: 14),
+                              Text('Buscando artículo…'),
+                            ],
+                          ),
+                        ),
                       ),
-                    );
-                  },
-                ),
-                ListTile(
-                  leading: const Icon(Icons.file_download, color: Colors.white),
-                  title: const Text(
-                    "Exportar todo el inventario",
-                    style: TextStyle(color: Colors.white),
-                  ),
-                  onTap: () {
-                    Navigator.pop(context);
-                    ExcelService.exportarRegistros(registrosFiltrados);
-                  },
-                ),
-                const Divider(color: Colors.grey),
-              ],
-              const Spacer(),
-              ListTile(
-                leading: const Icon(Icons.logout, color: Colors.redAccent),
-                title: const Text(
-                  "Cerrar Sesión",
-                  style: TextStyle(
-                    color: Colors.redAccent,
-                    fontWeight: FontWeight.bold,
+                    ),
                   ),
                 ),
-                onTap: () {
-                  Navigator.pop(context);
-                  _confirmarSalida();
-                },
-              ),
-              const SizedBox(height: 20),
             ],
           ),
         ),
-        body: Column(
-          children: [
-            Padding(
-              padding: const EdgeInsets.all(15.0),
-              child: ElevatedButton.icon(
-                onPressed: _abrirEscaner,
-                icon: const Icon(Icons.qr_code_scanner, color: Colors.white),
-                label: const Text(
-                  "ESCANEAR CÓDIGO QR",
-                  style: TextStyle(
-                    color: Colors.white,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-                style: ElevatedButton.styleFrom(
-                  minimumSize: const Size.fromHeight(60),
-                  backgroundColor: Colors.red.shade900,
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                ),
-              ),
-            ),
-            const Divider(),
-            Expanded(child: widget.esAdmin ? _cuerpoAdmin() : _cuerpoUsuario()),
-          ],
-        ),
         floatingActionButton: widget.esAdmin
-            ? FloatingActionButton(
-                backgroundColor: Colors.red.shade900,
-                foregroundColor: Colors.white,
-                onPressed: () async {
-                  final res = await Navigator.push(
-                    context,
-                    MaterialPageRoute(builder: (_) => const FormularioScreen()),
-                  );
-                  if (res == true) _cargarDatos();
-                },
-                child: const Icon(Icons.add_a_photo),
-              )
+            ? wide
+                ? FloatingActionButton.extended(
+                    onPressed: _abrirFormulario,
+                    icon: const Icon(Icons.add_rounded),
+                    label: const Text('Nuevo artículo'),
+                  )
+                : FloatingActionButton(
+                    tooltip: 'Nuevo artículo',
+                    onPressed: _abrirFormulario,
+                    child: const Icon(Icons.add_rounded),
+                  )
             : null,
       ),
     );
   }
 
-  Widget _cuerpoAdmin() {
-    if (_cargando) return const Center(child: CircularProgressIndicator());
-    return RefreshIndicator(
-      onRefresh: _cargarDatos,
-      child: ListView.builder(
-        itemCount: registrosFiltrados.length,
-        itemBuilder: (context, index) {
-          final item = registrosFiltrados[index];
-          final sel = idsSeleccionados.contains(item.id);
-          final firstPhoto =
-              item.listaFotos.isEmpty ? null : item.listaFotos.first;
-          return Card(
-            elevation: sel ? 4 : 1,
-            color: sel ? Colors.red.shade900.withAlpha(30) : null,
-            margin: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-            child: ListTile(
-              leading: GestureDetector(
-                onTap:
-                    item.id == null ? null : () => _toggleSeleccion(item.id!),
-                child: Stack(
-                  alignment: Alignment.center,
-                  children: [
-                    ClipRRect(
-                      borderRadius: BorderRadius.circular(5),
-                      child: firstPhoto == null
-                          ? const SizedBox(
-                              width: 50,
-                              height: 50,
-                              child: Icon(Icons.image_not_supported_outlined),
-                            )
-                          : Image.network(
-                              firstPhoto,
-                              width: 50,
-                              height: 50,
-                              fit: BoxFit.cover,
-                              errorBuilder: (_, __, ___) =>
-                                  const Icon(Icons.broken_image),
-                            ),
+  Widget _buildDrawer() {
+    return Drawer(
+      child: SafeArea(
+        child: Column(
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 18, 20, 16),
+              child: Row(
+                children: [
+                  CircleAvatar(
+                    radius: 28,
+                    backgroundColor: AppColors.primary.withValues(alpha: 0.16),
+                    child: Text(
+                      _userName.isEmpty ? 'U' : _userName[0].toUpperCase(),
+                      style: const TextStyle(
+                        color: AppColors.primary,
+                        fontSize: 22,
+                        fontWeight: FontWeight.w800,
+                      ),
                     ),
-                    if (sel)
-                      Container(
-                        width: 50,
-                        height: 50,
-                        decoration: BoxDecoration(
-                          color: Colors.red.withAlpha(100),
-                          borderRadius: BorderRadius.circular(5),
+                  ),
+                  const SizedBox(width: 14),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          _userName,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: Theme.of(context).textTheme.titleMedium,
                         ),
-                        child: const Icon(Icons.check, color: Colors.white),
-                      ),
-                  ],
-                ),
-              ),
-              title: Text(
-                item.nombre,
-                style: const TextStyle(fontWeight: FontWeight.bold),
-              ),
-              subtitle: Text(item.categoria),
-              trailing: PopupMenuButton(
-                onSelected: (val) async {
-                  if (val == 'ver') {
-                    Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                        builder: (_) => DetalleScreen(registro: item),
-                      ),
-                    );
-                  } else if (val == 'editar') {
-                    final res = await Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                        builder: (_) => FormularioScreen(registroEdicion: item),
-                      ),
-                    );
-                    if (res == true) _cargarDatos();
-                  } else if (val == 'borrar') {
-                    _confirmarEliminacion(item);
-                  }
-                },
-                itemBuilder: (context) => [
-                  const PopupMenuItem(
-                    value: 'ver',
-                    child: ListTile(
-                      leading: Icon(Icons.visibility),
-                      title: Text('Ver'),
-                    ),
-                  ),
-                  const PopupMenuItem(
-                    value: 'editar',
-                    child: ListTile(
-                      leading: Icon(Icons.edit),
-                      title: Text('Editar'),
-                    ),
-                  ),
-                  const PopupMenuItem(
-                    value: 'borrar',
-                    child: ListTile(
-                      leading: Icon(Icons.delete, color: Colors.red),
-                      title: Text('Eliminar'),
+                        const SizedBox(height: 2),
+                        Text(
+                          widget.esAdmin ? 'Administrador' : 'Consulta',
+                          style: const TextStyle(color: AppColors.textMuted),
+                        ),
+                      ],
                     ),
                   ),
                 ],
               ),
-              onTap: () {
-                if (modoSeleccion) {
-                  if (item.id != null) _toggleSeleccion(item.id!);
-                } else {
-                  Navigator.push(
-                    context,
-                    MaterialPageRoute(
-                      builder: (_) => DetalleScreen(registro: item),
-                    ),
-                  );
-                }
-              },
             ),
-          );
-        },
-      ),
-    );
-  }
-
-  Widget _cuerpoUsuario() {
-    return const Center(
-      child: Padding(
-        padding: EdgeInsets.all(40.0),
-        child: Text(
-          "Panel Corporativo v3.0\nEscanee un código QR para ver detalles",
-          textAlign: TextAlign.center,
+            const Divider(),
+            if (widget.esAdmin) ...[
+              _drawerItem(
+                Icons.group_outlined,
+                'Gestión de usuarios',
+                () => _openDrawerPage(const UsuariosScreen()),
+              ),
+              _drawerItem(
+                Icons.print_outlined,
+                'Configurar impresora',
+                () async {
+                  Navigator.pop(context);
+                  await PrinterPicker.mostrar(context);
+                },
+              ),
+              _drawerItem(
+                Icons.design_services_outlined,
+                'Diseño de etiqueta',
+                () => _openDrawerPage(const DisenoEtiquetaScreen()),
+              ),
+              _drawerItem(
+                Icons.ios_share_outlined,
+                'Exportar inventario',
+                () {
+                  Navigator.pop(context);
+                  _exportar(_filtrados);
+                },
+              ),
+            ],
+            const Spacer(),
+            const Divider(),
+            _drawerItem(
+              Icons.logout_rounded,
+              'Cerrar sesión',
+              () {
+                Navigator.pop(context);
+                _confirmarSalida();
+              },
+              color: Theme.of(context).colorScheme.error,
+            ),
+            const SizedBox(height: 12),
+          ],
         ),
       ),
     );
   }
 
-  void _confirmarEliminacion(Registro registro) async {
-    showDialog(
-      context: context,
-      builder: (dialogContext) => AlertDialog(
-        title: const Text("Eliminar Registro"),
-        content: Text("¿Desea eliminar '${registro.nombre}' del servidor?"),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(dialogContext),
-            child: const Text("CANCELAR"),
-          ),
-          TextButton(
-            onPressed: () async {
-              final dialogNavigator = Navigator.of(dialogContext);
-              try {
-                await ApiService.eliminar(registro.uuid);
-                if (!mounted) return;
-                dialogNavigator.pop();
-                await _cargarDatos();
-              } on ApiException catch (error) {
-                if (!mounted) return;
-                dialogNavigator.pop();
-                await _handleApiError(error);
-              }
-            },
-            child: const Text("ELIMINAR", style: TextStyle(color: Colors.red)),
-          ),
-        ],
-      ),
+  Widget _drawerItem(
+    IconData icon,
+    String label,
+    VoidCallback onTap, {
+    Color? color,
+  }) {
+    return ListTile(
+      minTileHeight: 54,
+      leading: Icon(icon, color: color),
+      title: Text(label, style: TextStyle(color: color)),
+      trailing: const Icon(Icons.chevron_right_rounded, size: 20),
+      onTap: onTap,
     );
   }
 
-  void _confirmarSalida() async {
-    showDialog(
-      context: context,
-      builder: (dialogContext) => AlertDialog(
-        title: const Text("Gestión de Sesión"),
-        content: const Text("¿Desea cerrar la sesión actual?"),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(dialogContext),
-            child: const Text("CANCELAR"),
+  void _openDrawerPage(Widget page) {
+    Navigator.pop(context);
+    Navigator.push(context, MaterialPageRoute(builder: (_) => page));
+  }
+
+  Widget _buildAdminBody() {
+    if (_cargando) {
+      return Center(
+        child: Semantics(
+          label: 'Cargando inventario',
+          child: const CircularProgressIndicator(),
+        ),
+      );
+    }
+    if (_filtrados.isEmpty) {
+      return RefreshIndicator(
+        onRefresh: _cargarDatos,
+        child: AppEmptyState(
+          icon: _searchController.text.isEmpty
+              ? Icons.inventory_2_outlined
+              : Icons.search_off_rounded,
+          title: _searchController.text.isEmpty
+              ? 'Inventario vacío'
+              : 'Sin coincidencias',
+          message: _errorCarga ??
+              (_searchController.text.isEmpty
+                  ? 'Agregue el primer artículo con el botón inferior.'
+                  : 'Pruebe con otro nombre, categoría o UUID.'),
+          actionLabel: _errorCarga == null ? null : 'Reintentar',
+          onAction: _errorCarga == null ? null : _cargarDatos,
+        ),
+      );
+    }
+
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final grid = constraints.maxWidth >= 720;
+        final padding =
+            EdgeInsets.fromLTRB(grid ? 24 : 12, 4, grid ? 24 : 12, 96);
+        return RefreshIndicator(
+          onRefresh: _cargarDatos,
+          child: grid
+              ? GridView.builder(
+                  physics: const AlwaysScrollableScrollPhysics(),
+                  padding: padding,
+                  gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                    crossAxisCount: 2,
+                    mainAxisSpacing: 12,
+                    crossAxisSpacing: 12,
+                    mainAxisExtent: 118,
+                  ),
+                  itemCount: _filtrados.length,
+                  itemBuilder: (_, index) => _InventoryTile(
+                    registro: _filtrados[index],
+                    selected: _seleccionados.contains(_filtrados[index].uuid),
+                    deleting: _eliminando.contains(_filtrados[index].uuid),
+                    selectionMode: _modoSeleccion,
+                    onTap: () => _onItemTap(_filtrados[index]),
+                    onLongPress: () => _toggleSeleccion(_filtrados[index].uuid),
+                    onAction: (action) =>
+                        _onItemAction(action, _filtrados[index]),
+                  ),
+                )
+              : ListView.separated(
+                  physics: const AlwaysScrollableScrollPhysics(),
+                  padding: padding,
+                  itemCount: _filtrados.length,
+                  separatorBuilder: (_, __) => const SizedBox(height: 10),
+                  itemBuilder: (_, index) => _InventoryTile(
+                    registro: _filtrados[index],
+                    selected: _seleccionados.contains(_filtrados[index].uuid),
+                    deleting: _eliminando.contains(_filtrados[index].uuid),
+                    selectionMode: _modoSeleccion,
+                    onTap: () => _onItemTap(_filtrados[index]),
+                    onLongPress: () => _toggleSeleccion(_filtrados[index].uuid),
+                    onAction: (action) =>
+                        _onItemAction(action, _filtrados[index]),
+                  ),
+                ),
+        );
+      },
+    );
+  }
+
+  Widget _buildOperatorBody() {
+    return const AppEmptyState(
+      icon: Icons.qr_code_scanner_rounded,
+      title: 'Listo para consultar',
+      message:
+          'Escanee la etiqueta QR de un artículo para abrir su información.',
+    );
+  }
+
+  void _onItemTap(Registro registro) {
+    if (_modoSeleccion) {
+      _toggleSeleccion(registro.uuid);
+    } else {
+      Navigator.push(
+        context,
+        MaterialPageRoute(builder: (_) => DetalleScreen(registro: registro)),
+      );
+    }
+  }
+
+  Future<void> _onItemAction(String action, Registro registro) async {
+    switch (action) {
+      case 'view':
+        _onItemTap(registro);
+        return;
+      case 'edit':
+        await _abrirFormulario(registro);
+        return;
+      case 'delete':
+        await _confirmarEliminacion(registro);
+        return;
+    }
+  }
+
+  Future<void> _confirmarEliminacion(Registro registro) async {
+    final confirmed = await showConfirmDialog(
+      context,
+      title: 'Eliminar artículo',
+      message:
+          '¿Desea eliminar “${registro.nombre}”? También se eliminarán sus fotografías del servidor.',
+      confirmLabel: 'Eliminar',
+      destructive: true,
+    );
+    if (!confirmed || !mounted || _eliminando.contains(registro.uuid)) return;
+
+    setState(() => _eliminando.add(registro.uuid));
+    try {
+      await ApiService.eliminar(registro.uuid);
+      await DbHelper.eliminarPorUuid(registro.uuid);
+      if (!mounted) return;
+      setState(() {
+        _registros = _registros
+            .where((item) => item.uuid != registro.uuid)
+            .toList(growable: false);
+        _filtrados = _filtrar(_registros);
+        _seleccionados.remove(registro.uuid);
+      });
+      showAppMessage(context, 'Artículo eliminado correctamente.');
+    } on ApiException catch (error) {
+      if (mounted) await _handleApiError(error);
+    } finally {
+      if (mounted) setState(() => _eliminando.remove(registro.uuid));
+    }
+  }
+
+  Future<void> _confirmarSalida() async {
+    final confirmed = await showConfirmDialog(
+      context,
+      title: 'Cerrar sesión',
+      message: '¿Desea cerrar la sesión de $_userName?',
+      confirmLabel: 'Cerrar sesión',
+      destructive: true,
+    );
+    if (!confirmed) return;
+    await ApiService.clearSession();
+    if (!mounted) return;
+    Navigator.pushNamedAndRemoveUntil(context, '/login', (_) => false);
+  }
+}
+
+class _InventoryTile extends StatelessWidget {
+  final Registro registro;
+  final bool selected;
+  final bool deleting;
+  final bool selectionMode;
+  final VoidCallback onTap;
+  final VoidCallback onLongPress;
+  final ValueChanged<String> onAction;
+
+  const _InventoryTile({
+    required this.registro,
+    required this.selected,
+    required this.deleting,
+    required this.selectionMode,
+    required this.onTap,
+    required this.onLongPress,
+    required this.onAction,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final photos = registro.listaFotos;
+    final photo = photos.isEmpty ? null : photos.first;
+    return Semantics(
+      selected: selected,
+      button: true,
+      label: '${registro.nombre}, categoría ${registro.categoria}',
+      child: Card(
+        color: selected
+            ? AppColors.primary.withValues(alpha: 0.13)
+            : AppColors.surface,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(18),
+          side: BorderSide(
+            color: selected ? AppColors.primary : AppColors.border,
+            width: selected ? 1.5 : 1,
           ),
-          TextButton(
-            onPressed: () async {
-              final navigator = Navigator.of(context);
-              await ApiService.clearSession();
-              if (!mounted) return;
-              navigator.pushNamedAndRemoveUntil('/login', (_) => false);
-            },
-            child: const Text(
-              "CERRAR SESIÓN",
-              style: TextStyle(color: Colors.red),
+        ),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(18),
+          onTap: deleting ? null : onTap,
+          onLongPress: deleting ? null : onLongPress,
+          child: Padding(
+            padding: const EdgeInsets.all(10),
+            child: Row(
+              children: [
+                _Thumbnail(path: photo, selected: selected),
+                const SizedBox(width: 13),
+                Expanded(
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        registro.nombre,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: Theme.of(context).textTheme.titleMedium,
+                      ),
+                      const SizedBox(height: 6),
+                      Row(
+                        children: [
+                          const Icon(
+                            Icons.sell_outlined,
+                            size: 15,
+                            color: AppColors.textMuted,
+                          ),
+                          const SizedBox(width: 5),
+                          Expanded(
+                            child: Text(
+                              registro.categoria,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                color: AppColors.textMuted,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+                if (deleting)
+                  const Padding(
+                    padding: EdgeInsets.all(13),
+                    child: SizedBox(
+                      width: 22,
+                      height: 22,
+                      child: CircularProgressIndicator(strokeWidth: 2.5),
+                    ),
+                  )
+                else if (!selectionMode)
+                  PopupMenuButton<String>(
+                    tooltip: 'Opciones de ${registro.nombre}',
+                    onSelected: onAction,
+                    itemBuilder: (_) => const [
+                      PopupMenuItem(
+                        value: 'view',
+                        child: _MenuEntry(Icons.visibility_outlined, 'Ver'),
+                      ),
+                      PopupMenuItem(
+                        value: 'edit',
+                        child: _MenuEntry(Icons.edit_outlined, 'Editar'),
+                      ),
+                      PopupMenuItem(
+                        value: 'delete',
+                        child: _MenuEntry(
+                          Icons.delete_outline,
+                          'Eliminar',
+                          destructive: true,
+                        ),
+                      ),
+                    ],
+                  ),
+              ],
             ),
           ),
-        ],
+        ),
       ),
+    );
+  }
+}
+
+class _Thumbnail extends StatelessWidget {
+  final String? path;
+  final bool selected;
+
+  const _Thumbnail({required this.path, required this.selected});
+
+  @override
+  Widget build(BuildContext context) {
+    Widget image;
+    if (path == null) {
+      image =
+          const Icon(Icons.inventory_2_outlined, color: AppColors.textMuted);
+    } else if (path!.startsWith('http')) {
+      image = Image.network(
+        path!,
+        fit: BoxFit.cover,
+        cacheWidth: 180,
+        loadingBuilder: (_, child, progress) => progress == null
+            ? child
+            : const Center(
+                child: SizedBox(
+                  width: 18,
+                  height: 18,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ),
+              ),
+        errorBuilder: (_, __, ___) => const Icon(
+          Icons.broken_image_outlined,
+          color: AppColors.textMuted,
+        ),
+      );
+    } else {
+      image = Image.file(
+        File(path!),
+        fit: BoxFit.cover,
+        cacheWidth: 180,
+        errorBuilder: (_, __, ___) => const Icon(
+          Icons.broken_image_outlined,
+          color: AppColors.textMuted,
+        ),
+      );
+    }
+
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(13),
+      child: SizedBox(
+        width: 76,
+        height: 76,
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            ColoredBox(color: AppColors.surfaceRaised, child: image),
+            if (selected)
+              ColoredBox(
+                color: AppColors.primary.withValues(alpha: 0.68),
+                child: const Icon(Icons.check_rounded, color: Colors.white),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _MenuEntry extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final bool destructive;
+
+  const _MenuEntry(this.icon, this.label, {this.destructive = false});
+
+  @override
+  Widget build(BuildContext context) {
+    final color = destructive ? Theme.of(context).colorScheme.error : null;
+    return Row(
+      children: [
+        Icon(icon, size: 20, color: color),
+        const SizedBox(width: 12),
+        Text(label, style: TextStyle(color: color)),
+      ],
     );
   }
 }

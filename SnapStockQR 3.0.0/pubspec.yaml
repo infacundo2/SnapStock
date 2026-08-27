@@ -1,5 +1,5 @@
 name: foto_catalogo
-description: "A new Flutter project."
+description: "Inventario corporativo con fotografías, consulta QR y etiquetas ZPL."
 publish_to: 'none'
 
 version: 3.0.0+1
@@ -36,6 +36,8 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+  assets:
+    - assets/icon.png
 
 flutter_launcher_icons:
   android: true

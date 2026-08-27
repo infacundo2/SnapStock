@@ -1,18 +1,25 @@
-import 'dart:io';
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
+
 import 'package:shared_preferences/shared_preferences.dart';
+
 import '../models/registro_model.dart';
 
 class PrintService {
   static const int lprPort = 515;
+  static const _connectionTimeout = Duration(seconds: 5);
 
-  // --- MÉTODOS DE CONFIGURACIÓN DE IMPRESORA ---
-  static Future<void> guardarConfiguracion(String ip, String nombre) async {
+  static Future<void> guardarConfiguracion(String host, String queue) async {
+    final cleanHost = host.trim();
+    final cleanQueue = queue.trim();
+    if (!_isSafeLprValue(cleanHost) || !_isSafeLprValue(cleanQueue)) {
+      throw Exception('La dirección o el nombre de cola no son válidos.');
+    }
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setString('printer_ip', ip);
-    await prefs.setString('printer_name', nombre);
+    await prefs.setString('printer_ip', cleanHost);
+    await prefs.setString('printer_name', cleanQueue);
   }
 
   static Future<String?> obtenerIpGuardada() async {
@@ -25,28 +32,28 @@ class PrintService {
     return prefs.getString('printer_name');
   }
 
-  /// Método de depuración para probar la conexión al puerto 515 (LPD/LPR)
-  static Future<String> probarConexion(String ip) async {
+  static Future<String> probarConexion(String host) async {
+    final cleanHost = host.trim();
+    if (!_isSafeLprValue(cleanHost)) return 'Dirección no válida.';
+    Socket? socket;
     try {
-      // Intentamos conectar al puerto 515 (estándar para colas de impresión compartidas)
-      final socket = await Socket.connect(
-        ip,
+      socket = await Socket.connect(
+        cleanHost,
         lprPort,
         timeout: const Duration(seconds: 4),
       );
-      socket.destroy();
-      return "OK";
-    } on SocketException catch (e) {
-      // Capturamos el error específico del sistema
-      return "Error de red: ${e.message} (Código: ${e.osError?.errorCode})";
+      return 'OK';
+    } on SocketException catch (error) {
+      return 'No se pudo conectar: ${error.message}.';
     } on TimeoutException {
-      return "Tiempo de espera agotado. Verifique que la IP sea correcta y que el Firewall no bloquee el puerto 515.";
-    } catch (e) {
-      return "Error inesperado: $e";
+      return 'Tiempo de espera agotado. Revise la red y el puerto 515.';
+    } catch (_) {
+      return 'No fue posible comprobar la impresora.';
+    } finally {
+      socket?.destroy();
     }
   }
 
-  // --- MÉTODOS PARA DISEÑO DE ETIQUETA ---
   static Future<void> guardarAjustesEtiqueta({
     required double ancho,
     required double alto,
@@ -56,12 +63,12 @@ class PrintService {
     required int qrSize,
   }) async {
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setDouble('label_width', ancho);
-    await prefs.setDouble('label_height', alto);
-    await prefs.setInt('label_cols', columnas);
-    await prefs.setDouble('qr_x', qrX);
-    await prefs.setDouble('qr_y', qrY);
-    await prefs.setInt('qr_size', qrSize);
+    await prefs.setDouble('label_width', ancho.clamp(40.0, 110.0));
+    await prefs.setDouble('label_height', alto.clamp(15.0, 100.0));
+    await prefs.setInt('label_cols', columnas.clamp(1, 2));
+    await prefs.setDouble('qr_x', qrX.clamp(0.0, ancho * 8));
+    await prefs.setDouble('qr_y', qrY.clamp(0.0, alto * 8));
+    await prefs.setInt('qr_size', qrSize.clamp(2, 10));
   }
 
   static Future<Map<String, dynamic>> obtenerAjustesEtiqueta() async {
@@ -76,91 +83,144 @@ class PrintService {
     };
   }
 
-  static Future<void> imprimirEtiqueta(Registro reg) async {
-    String? ip = await obtenerIpGuardada();
-    String? nombre = await obtenerNombreGuardado();
-    Map<String, dynamic> ajustes = await obtenerAjustesEtiqueta();
-
-    if (ip == null || nombre == null || ip.isEmpty || nombre.isEmpty) {
+  static Future<void> imprimirEtiqueta(Registro registro) async {
+    final host = (await obtenerIpGuardada())?.trim();
+    final queue = (await obtenerNombreGuardado())?.trim();
+    final settings = await obtenerAjustesEtiqueta();
+    if (host == null ||
+        queue == null ||
+        !_isSafeLprValue(host) ||
+        !_isSafeLprValue(queue)) {
       throw Exception(
-        "Por favor, configure la IP y el nombre de la impresora en los ajustes.",
+        'Configure la dirección y el nombre de cola de la impresora.',
       );
     }
 
-    int dotPW = (ajustes['ancho'] * 8).toInt();
-    int dotLL = (ajustes['alto'] * 8).toInt();
-    int qrX = ajustes['qrX'].toInt();
-    int qrY = ajustes['qrY'].toInt();
-    int qrS = ajustes['qrSize'];
-    int cols = ajustes['columnas'];
+    final widthDots = ((settings['ancho'] as double) * 8).round();
+    final heightDots = ((settings['alto'] as double) * 8).round();
+    final qrSize = settings['qrSize'] as int;
+    final columns = settings['columnas'] as int;
+    final estimatedQrDots = qrSize * 30;
+    final columnWidth = columns == 2 ? widthDots ~/ 2 : widthDots;
+    final qrX = (settings['qrX'] as double)
+        .round()
+        .clamp(0, (columnWidth - estimatedQrDots).clamp(0, columnWidth));
+    final qrY = (settings['qrY'] as double)
+        .round()
+        .clamp(0, (heightDots - estimatedQrDots).clamp(0, heightDots));
+
+    var zpl = '^XA^PW$widthDots^LL$heightDots';
+    zpl +=
+        '^FO$qrX,$qrY^BQN,2,$qrSize^FDQA,fotocatalogo://registro/${registro.uuid}^FS';
+    if (columns == 2) {
+      zpl +=
+          '^FO${qrX + columnWidth},$qrY^BQN,2,$qrSize^FDQA,fotocatalogo://registro/${registro.uuid}^FS';
+    }
+    zpl += '^XZ\n';
+
+    final data = Uint8List.fromList(utf8.encode(zpl));
+    final jobNumber = (DateTime.now().millisecondsSinceEpoch % 1000)
+        .toString()
+        .padLeft(3, '0');
+    const clientHost = 'snapstock';
+    final dataName = 'dfA$jobNumber$clientHost';
+    final controlName = 'cfA$jobNumber$clientHost';
+    final control = Uint8List.fromList(
+      utf8.encode(
+        'H$clientHost\n'
+        'Psnapstock\n'
+        'l$dataName\n'
+        'U$dataName\n'
+        'N${_safeJobName(registro.nombre)}\n',
+      ),
+    );
 
     Socket? socket;
+    StreamIterator<Uint8List>? iterator;
     try {
       socket = await Socket.connect(
-        ip,
+        host,
         lprPort,
-        timeout: const Duration(seconds: 5),
-      ).catchError((e) => throw Exception("No se pudo conectar a la IP $ip."));
+        timeout: _connectionTimeout,
+      );
+      socket.setOption(SocketOption.tcpNoDelay, true);
+      iterator = StreamIterator<Uint8List>(socket);
 
-      final iterator = StreamIterator(socket);
       socket.add([0x02]);
-      socket.write("$nombre\n");
+      socket.write('$queue\n');
       await socket.flush();
-      await _esperarOk(iterator, "reconocer impresora");
+      await _waitForAck(iterator, 'abrir la cola de impresión');
 
-      String zplData = "^XA^PW$dotPW^LL$dotLL";
-      zplData +=
-          "^FO$qrX,$qrY^BQN,2,$qrS^FDQA,fotocatalogo://registro/${reg.uuid}^FS";
-
-      if (cols == 2) {
-        int offsetX = (dotPW / 2).toInt();
-        zplData +=
-            "^FO${qrX + offsetX},$qrY^BQN,2,$qrS^FDQA,fotocatalogo://registro/${reg.uuid}^FS";
-      }
-
-      zplData += "^XZ\n";
-      Uint8List dataBytes = utf8.encode(zplData);
-
-      String host = "android";
-      String jobNum = "123";
-
-      socket.add([0x03]);
-      socket.write("${dataBytes.length} dfA$jobNum$host\n");
-      await socket.flush();
-      await _esperarOk(iterator, "preparar datos");
-
-      socket.add(dataBytes);
-      socket.add([0x00]);
-      await socket.flush();
-      await _esperarOk(iterator, "enviar ZPL");
-
-      String controlContent = "H$host\nPadmin\nldfA$jobNum$host\n";
-      Uint8List controlBytes = utf8.encode(controlContent);
-      socket.add([0x02]);
-      socket.write("${controlBytes.length} cfA$jobNum$host\n");
-      await socket.flush();
-      await _esperarOk(iterator, "finalizar");
-
-      socket.add(controlBytes);
-      socket.add([0x00]);
-      await socket.flush();
-      await _esperarOk(iterator, "completar");
-    } catch (e) {
-      throw Exception(e.toString().replaceAll("Exception:", ""));
+      await _sendLprFile(
+        socket,
+        iterator,
+        command: 0x02,
+        name: controlName,
+        bytes: control,
+        step: 'enviar el archivo de control',
+      );
+      await _sendLprFile(
+        socket,
+        iterator,
+        command: 0x03,
+        name: dataName,
+        bytes: data,
+        step: 'enviar la etiqueta',
+      );
+    } on TimeoutException {
+      throw Exception('La impresora no respondió dentro del tiempo esperado.');
+    } on SocketException {
+      throw Exception('No se pudo conectar con la impresora $host:$lprPort.');
+    } catch (error) {
+      if (error is Exception) rethrow;
+      throw Exception('No fue posible completar la impresión.');
     } finally {
+      await iterator?.cancel();
       socket?.destroy();
     }
   }
 
-  static Future<void> _esperarOk(
+  static Future<void> _sendLprFile(
+    Socket socket,
+    StreamIterator<Uint8List> iterator, {
+    required int command,
+    required String name,
+    required Uint8List bytes,
+    required String step,
+  }) async {
+    socket.add([command]);
+    socket.write('${bytes.length} $name\n');
+    await socket.flush();
+    await _waitForAck(iterator, step);
+
+    socket.add(bytes);
+    socket.add([0x00]);
+    await socket.flush();
+    await _waitForAck(iterator, step);
+  }
+
+  static Future<void> _waitForAck(
     StreamIterator<Uint8List> iterator,
-    String paso,
+    String step,
   ) async {
-    if (await iterator.moveNext().timeout(const Duration(seconds: 5))) {
-      final respuesta = iterator.current;
-      if (respuesta.isEmpty || respuesta[0] != 0) {
-        throw Exception("Error en $paso.");
-      }
+    final hasData = await iterator.moveNext().timeout(_connectionTimeout);
+    if (!hasData || iterator.current.isEmpty) {
+      throw Exception('La impresora cerró la conexión al $step.');
     }
+    if (iterator.current.first != 0) {
+      throw Exception('La impresora rechazó la operación al $step.');
+    }
+  }
+
+  static bool _isSafeLprValue(String value) {
+    return value.isNotEmpty &&
+        value.length <= 255 &&
+        !value.contains(RegExp(r'[\r\n\x00]'));
+  }
+
+  static String _safeJobName(String value) {
+    final clean = value.replaceAll(RegExp(r'[\r\n\x00]'), ' ').trim();
+    if (clean.isEmpty) return 'SnapStock QR';
+    return clean.substring(0, clean.length > 80 ? 80 : clean.length);
   }
 }

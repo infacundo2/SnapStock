@@ -1,12 +1,16 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:intl/intl.dart';
-import 'dart:io';
-import '../models/registro_model.dart';
-import '../database/db_helper.dart';
-import '../services/print_service.dart';
-import '../services/api_service.dart';
 import 'package:uuid/uuid.dart';
+
+import '../database/db_helper.dart';
+import '../models/registro_model.dart';
+import '../services/api_service.dart';
+import '../services/print_service.dart';
+import '../ui/app_theme.dart';
+import '../widgets/app_components.dart';
 
 class FormularioScreen extends StatefulWidget {
   final Registro? registroEdicion;
@@ -18,338 +22,451 @@ class FormularioScreen extends StatefulWidget {
 }
 
 class _FormularioScreenState extends State<FormularioScreen> {
+  static const _maxPhotos = 8;
+
+  final _formKey = GlobalKey<FormState>();
   final _nombreController = TextEditingController();
   final _obsController = TextEditingController();
   final _nuevaCategoriaController = TextEditingController();
-  String _categoriaSeleccionada = 'General';
-  final List<String> _categoriasExistentes = [
+  final _picker = ImagePicker();
+  final List<String> _categorias = [
     'General',
     'Inventario',
     'Personal',
     'Otros',
   ];
-  List<String> _listaFotosPaths = [];
-  bool _subiendo = false;
-  int? _idRecienCreado;
-  String? _uuidFijo;
+
+  late final String _uuid;
+  String _categoriaSeleccionada = 'General';
+  List<String> _fotos = [];
+  bool _guardando = false;
+  bool _cargandoCategorias = true;
 
   @override
   void initState() {
     super.initState();
-    _cargarCategoriasDesdeServidor();
-    if (widget.registroEdicion != null) {
-      _nombreController.text = widget.registroEdicion!.nombre;
-      _obsController.text = widget.registroEdicion!.observaciones;
-      _categoriaSeleccionada = widget.registroEdicion!.categoria;
-      _listaFotosPaths = widget.registroEdicion!.listaFotos;
-      _uuidFijo = widget.registroEdicion!.uuid;
-      if (!_categoriasExistentes.contains(_categoriaSeleccionada)) {
-        _categoriasExistentes.insert(
-          _categoriasExistentes.length - 1,
-          _categoriaSeleccionada,
-        );
+    final registro = widget.registroEdicion;
+    _uuid = registro?.uuid ?? const Uuid().v4();
+    if (registro != null) {
+      _nombreController.text = registro.nombre;
+      _obsController.text = registro.observaciones;
+      _categoriaSeleccionada = registro.categoria;
+      _fotos = List<String>.of(registro.listaFotos);
+      if (!_categorias.contains(_categoriaSeleccionada)) {
+        _categorias.insert(_categorias.length - 1, _categoriaSeleccionada);
       }
-    } else {
-      _uuidFijo = const Uuid().v4();
     }
+    _cargarCategorias();
   }
 
-  Future<void> _cargarCategoriasDesdeServidor() async {
+  @override
+  void dispose() {
+    _nombreController.dispose();
+    _obsController.dispose();
+    _nuevaCategoriaController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _cargarCategorias() async {
     try {
       final categorias = await ApiService.obtenerCategorias();
       if (!mounted) return;
       setState(() {
-        for (var cat in categorias) {
-          if (!_categoriasExistentes.contains(cat)) {
-            _categoriasExistentes.insert(_categoriasExistentes.length - 1, cat);
+        for (final categoria in categorias) {
+          final clean = categoria.trim();
+          if (clean.isNotEmpty && !_categorias.contains(clean)) {
+            _categorias.insert(_categorias.length - 1, clean);
           }
         }
+        _cargandoCategorias = false;
       });
     } on ApiException catch (error) {
-      if (mounted && !error.isUnauthorized) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text(error.message)));
-      }
+      if (!mounted) return;
+      setState(() => _cargandoCategorias = false);
+      await _handleApiError(error);
     }
   }
 
-  Future<void> _agregarFoto() async {
-    final ImagePicker picker = ImagePicker();
-    final XFile? photo = await picker.pickImage(
-      source: ImageSource.camera,
-      imageQuality: 70,
-    );
-    if (photo != null) {
-      setState(() {
-        _listaFotosPaths.add(photo.path);
-      });
+  Future<void> _elegirOrigenFoto() async {
+    if (_fotos.length >= _maxPhotos) {
+      showAppMessage(
+        context,
+        'Puede adjuntar hasta $_maxPhotos fotografías.',
+        error: true,
+      );
+      return;
     }
-  }
 
-  void _mostrarErrorCentro(String mensaje) {
-    showDialog(
+    final source = await showModalBottomSheet<ImageSource>(
       context: context,
-      builder: (context) => Center(
-        child: Container(
-          margin: const EdgeInsets.symmetric(horizontal: 30),
-          padding: const EdgeInsets.all(25),
-          decoration: BoxDecoration(
-            color: const Color(0xFF1A1A1A),
-            borderRadius: BorderRadius.circular(15),
-            border: Border.all(color: Colors.red.shade800, width: 2),
-          ),
-          child: Material(
-            color: Colors.transparent,
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(
-                  Icons.warning_amber_rounded,
-                  color: Colors.red.shade400,
-                  size: 50,
+      showDragHandle: true,
+      builder: (sheetContext) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Text(
+                'Agregar fotografía',
+                style: Theme.of(context).textTheme.titleLarge,
+              ),
+              const SizedBox(height: 12),
+              ListTile(
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(14),
                 ),
-                const SizedBox(height: 20),
-                const Text(
-                  "ERROR DE SISTEMA",
-                  style: TextStyle(
-                    color: Colors.white,
-                    fontWeight: FontWeight.bold,
-                    fontSize: 18,
-                  ),
+                leading: const Icon(Icons.photo_camera_outlined),
+                title: const Text('Tomar una foto'),
+                onTap: () => Navigator.pop(sheetContext, ImageSource.camera),
+              ),
+              ListTile(
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(14),
                 ),
-                const SizedBox(height: 15),
-                Text(
-                  mensaje,
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                    color: Colors.red.shade300,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-                const SizedBox(height: 25),
-                ElevatedButton(
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.red.shade900,
-                    foregroundColor: Colors.white,
-                  ),
-                  onPressed: () => Navigator.pop(context),
-                  child: const Text(
-                    "CERRAR AVISO",
-                    style: TextStyle(fontWeight: FontWeight.bold),
-                  ),
-                ),
-              ],
-            ),
+                leading: const Icon(Icons.photo_library_outlined),
+                title: const Text('Elegir desde galería'),
+                onTap: () => Navigator.pop(sheetContext, ImageSource.gallery),
+              ),
+            ],
           ),
         ),
       ),
     );
-  }
+    if (source == null) return;
 
-  void _mostrarDialogoImpresion(Registro registro, {bool esEdicion = false}) {
-    showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (dialogContext) => AlertDialog(
-        title: Text(esEdicion ? "Cambios Guardados" : "Registro Guardado"),
-        content: const Text("¿Desea imprimir la etiqueta QR?"),
-        actions: [
-          TextButton(
-            onPressed: () {
-              Navigator.pop(dialogContext);
-              Navigator.pop(context, true);
-            },
-            child: const Text("NO"),
-          ),
-          ElevatedButton(
-            onPressed: () async {
-              final dialogNavigator = Navigator.of(dialogContext);
-              final pageNavigator = Navigator.of(context);
-              try {
-                await PrintService.imprimirEtiqueta(registro);
-                if (!mounted) return;
-                dialogNavigator.pop();
-                pageNavigator.pop(true);
-              } catch (e) {
-                if (!mounted) return;
-                dialogNavigator.pop();
-                _mostrarErrorCentro(e.toString().replaceAll("Exception:", ""));
-              }
-            },
-            child: const Text("SÍ, IMPRIMIR"),
-          ),
-        ],
-      ),
-    );
+    try {
+      if (source == ImageSource.camera) {
+        final photo = await _picker.pickImage(
+          source: source,
+          imageQuality: 78,
+          maxWidth: 2200,
+        );
+        if (photo != null && mounted) {
+          setState(() => _fotos.add(photo.path));
+        }
+      } else {
+        final remaining = _maxPhotos - _fotos.length;
+        final photos = await _picker.pickMultiImage(
+          imageQuality: 78,
+          maxWidth: 2200,
+          limit: remaining,
+        );
+        if (mounted && photos.isNotEmpty) {
+          setState(() {
+            _fotos.addAll(photos.take(remaining).map((photo) => photo.path));
+          });
+        }
+      }
+    } catch (_) {
+      if (mounted) {
+        showAppMessage(
+          context,
+          'No fue posible acceder a la cámara o galería.',
+          error: true,
+        );
+      }
+    }
   }
 
   Future<void> _guardarArticulo() async {
-    if (_listaFotosPaths.isEmpty || _nombreController.text.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("Faltan datos obligatorios")),
+    FocusManager.instance.primaryFocus?.unfocus();
+    if (!_formKey.currentState!.validate() || _guardando) return;
+    if (_fotos.isEmpty) {
+      showAppMessage(
+        context,
+        'Agregue al menos una fotografía del artículo.',
+        error: true,
       );
       return;
     }
-    setState(() {
-      _subiendo = true;
-    });
-    try {
-      String catFinal = _categoriaSeleccionada == 'Otros'
-          ? _nuevaCategoriaController.text
-          : _categoriaSeleccionada;
-      if (catFinal.isEmpty) catFinal = 'General';
 
-      // RECOPILAMOS TODAS LAS FOTOS NUEVAS (ARCHIVOS LOCALES)
-      List<File> fotosNuevas = [];
-      for (var path in _listaFotosPaths) {
-        if (!path.startsWith('http')) {
-          fotosNuevas.add(File(path));
+    final localPhotos = <File>[];
+    for (final path in _fotos.where((path) => !path.startsWith('http'))) {
+      final file = File(path);
+      if (!await file.exists()) {
+        if (mounted) {
+          showAppMessage(
+            context,
+            'Una fotografía ya no está disponible. Elimínela y agréguela nuevamente.',
+            error: true,
+          );
         }
+        return;
       }
+      localPhotos.add(file);
+    }
 
+    setState(() => _guardando = true);
+    final isEditing = widget.registroEdicion != null;
+    try {
+      final categoria = _categoriaSeleccionada == 'Otros'
+          ? _nuevaCategoriaController.text.trim()
+          : _categoriaSeleccionada.trim();
       final registro = Registro(
-        id: widget.registroEdicion?.id ?? _idRecienCreado,
-        uuid: _uuidFijo!,
-        nombre: _nombreController.text,
+        id: widget.registroEdicion?.id,
+        uuid: _uuid,
+        nombre: _nombreController.text.trim(),
         fecha: widget.registroEdicion?.fecha ??
             DateFormat('dd-MM-yyyy HH:mm').format(DateTime.now()),
-        observaciones: _obsController.text,
-        categoria: catFinal,
-        fotoPaths: _listaFotosPaths.join(
-          ',',
-        ), // Enviamos la lista completa de rutas al servidor
+        observaciones: _obsController.text.trim(),
+        categoria: categoria,
+        fotoPaths: _fotos.join(','),
       );
 
-      final exito = await ApiService.guardar(registro, fotosNuevas);
-
-      if (exito) {
-        if (registro.id == null) {
-          _idRecienCreado = await DbHelper.insertar(registro);
-          registro.id = _idRecienCreado;
-        } else {
-          await DbHelper.actualizar(registro);
-        }
-        if (!mounted) return;
-        setState(() {
-          _subiendo = false;
-        });
-        _mostrarDialogoImpresion(
-          registro,
-          esEdicion: widget.registroEdicion != null || _idRecienCreado != null,
-        );
-      } else {
-        throw Exception("Error al conectar con el servidor corporativo.");
-      }
-    } catch (e) {
+      registro.fotoPaths = await ApiService.guardar(registro, localPhotos);
+      await DbHelper.guardar(registro);
       if (!mounted) return;
       setState(() {
-        _subiendo = false;
+        _fotos = List<String>.of(registro.listaFotos);
+        _guardando = false;
       });
-      _mostrarErrorCentro(e.toString().replaceAll("Exception:", ""));
+      await _mostrarDialogoImpresion(registro, isEditing: isEditing);
+    } on ApiException catch (error) {
+      if (!mounted) return;
+      setState(() => _guardando = false);
+      await _handleApiError(error);
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _guardando = false);
+      showAppMessage(
+        context,
+        'No fue posible guardar el artículo.',
+        error: true,
+      );
     }
+  }
+
+  Future<void> _mostrarDialogoImpresion(
+    Registro registro, {
+    required bool isEditing,
+  }) async {
+    var printing = false;
+    String? printError;
+    final result = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          icon: const Icon(
+            Icons.check_circle_rounded,
+            color: AppColors.success,
+            size: 42,
+          ),
+          title: Text(isEditing ? 'Cambios guardados' : 'Artículo guardado'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text('¿Desea imprimir ahora la etiqueta QR?'),
+              if (printError != null) ...[
+                const SizedBox(height: 14),
+                Text(
+                  printError!,
+                  textAlign: TextAlign.center,
+                  style: TextStyle(color: Theme.of(context).colorScheme.error),
+                ),
+              ],
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed:
+                  printing ? null : () => Navigator.pop(dialogContext, true),
+              child: const Text('Cerrar'),
+            ),
+            FilledButton.icon(
+              onPressed: printing
+                  ? null
+                  : () async {
+                      setDialogState(() {
+                        printing = true;
+                        printError = null;
+                      });
+                      try {
+                        await PrintService.imprimirEtiqueta(registro);
+                        if (dialogContext.mounted) {
+                          Navigator.pop(dialogContext, true);
+                        }
+                      } catch (error) {
+                        if (!dialogContext.mounted) return;
+                        setDialogState(() {
+                          printing = false;
+                          printError = error
+                              .toString()
+                              .replaceFirst('Exception: ', '')
+                              .trim();
+                        });
+                      }
+                    },
+              icon: printing
+                  ? const SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: Colors.white,
+                      ),
+                    )
+                  : const Icon(Icons.print_outlined),
+              label: Text(printing ? 'Imprimiendo…' : 'Imprimir'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (result == true && mounted) Navigator.pop(context, true);
+  }
+
+  Future<void> _imprimirActual() async {
+    if (_guardando || widget.registroEdicion == null) return;
+    setState(() => _guardando = true);
+    try {
+      await PrintService.imprimirEtiqueta(widget.registroEdicion!);
+      if (mounted) showAppMessage(context, 'Etiqueta enviada a la impresora.');
+    } catch (error) {
+      if (mounted) {
+        showAppMessage(
+          context,
+          error.toString().replaceFirst('Exception: ', '').trim(),
+          error: true,
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _guardando = false);
+    }
+  }
+
+  Future<void> _handleApiError(ApiException error) async {
+    if (error.isUnauthorized) {
+      await ApiService.clearSession();
+      if (!mounted) return;
+      Navigator.pushNamedAndRemoveUntil(context, '/login', (_) => false);
+      return;
+    }
+    showAppMessage(context, error.message, error: true);
   }
 
   @override
   Widget build(BuildContext context) {
+    final editing = widget.registroEdicion != null;
     return Scaffold(
       appBar: AppBar(
-        title: Text(
-          widget.registroEdicion == null
-              ? 'Nuevo Corporativo'
-              : 'Editar Corporativo',
-        ),
+        title: Text(editing ? 'Editar artículo' : 'Nuevo artículo'),
         actions: [
-          if (widget.registroEdicion != null)
+          if (editing)
             IconButton(
-              icon: const Icon(Icons.print, color: Colors.white),
-              tooltip: "Solo Imprimir",
-              onPressed: () async {
-                final messenger = ScaffoldMessenger.of(context);
-                try {
-                  await PrintService.imprimirEtiqueta(widget.registroEdicion!);
-                  if (mounted) {
-                    messenger.showSnackBar(
-                      const SnackBar(content: Text("Enviado a impresora")),
-                    );
-                  }
-                } catch (e) {
-                  if (!mounted) return;
-                  _mostrarErrorCentro(
-                    e.toString().replaceAll("Exception:", ""),
-                  );
-                }
-              },
+              tooltip: 'Imprimir etiqueta actual',
+              onPressed: _guardando ? null : _imprimirActual,
+              icon: const Icon(Icons.print_outlined),
             ),
         ],
       ),
-      body: _subiendo
-          ? const Center(child: CircularProgressIndicator())
-          : Column(
-              children: [
-                Expanded(
-                  child: SingleChildScrollView(
-                    padding: const EdgeInsets.all(16.0),
-                    child: Column(
-                      children: [
-                        SizedBox(
-                          height: 150,
-                          child: ListView.builder(
-                            scrollDirection: Axis.horizontal,
-                            itemCount: _listaFotosPaths.length + 1,
-                            itemBuilder: (context, index) {
-                              if (index == _listaFotosPaths.length) {
-                                return GestureDetector(
-                                  onTap: _agregarFoto,
-                                  child: Container(
-                                    width: 120,
-                                    margin: const EdgeInsets.only(right: 10),
-                                    decoration: BoxDecoration(
-                                      border: Border.all(color: Colors.grey),
-                                      borderRadius: BorderRadius.circular(10),
-                                    ),
-                                    child: const Icon(
-                                      Icons.add_a_photo,
-                                      size: 40,
-                                      color: Colors.grey,
-                                    ),
-                                  ),
-                                );
-                              }
-                              final path = _listaFotosPaths[index];
-                              return Stack(
+      body: SafeArea(
+        top: false,
+        child: Stack(
+          children: [
+            Form(
+              key: _formKey,
+              child: LayoutBuilder(
+                builder: (context, constraints) => SingleChildScrollView(
+                  keyboardDismissBehavior:
+                      ScrollViewKeyboardDismissBehavior.onDrag,
+                  padding: EdgeInsets.fromLTRB(
+                    constraints.maxWidth >= 700 ? 28 : 16,
+                    12,
+                    constraints.maxWidth >= 700 ? 28 : 16,
+                    24 + MediaQuery.viewInsetsOf(context).bottom,
+                  ),
+                  child: Center(
+                    child: ConstrainedBox(
+                      constraints: const BoxConstraints(maxWidth: 900),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          AppSectionTitle(
+                            'Fotografías',
+                            trailing: '${_fotos.length}/$_maxPhotos',
+                          ),
+                          const SizedBox(height: 12),
+                          _PhotoStrip(
+                            photos: _fotos,
+                            canAdd: _fotos.length < _maxPhotos,
+                            onAdd: _elegirOrigenFoto,
+                            onRemove: (index) =>
+                                setState(() => _fotos.removeAt(index)),
+                          ),
+                          const SizedBox(height: 26),
+                          const AppSectionTitle('Información del artículo'),
+                          const SizedBox(height: 12),
+                          LayoutBuilder(
+                            builder: (context, fieldConstraints) {
+                              final twoColumns =
+                                  fieldConstraints.maxWidth >= 680;
+                              final width = twoColumns
+                                  ? (fieldConstraints.maxWidth - 14) / 2
+                                  : fieldConstraints.maxWidth;
+                              return Wrap(
+                                spacing: 14,
+                                runSpacing: 14,
                                 children: [
-                                  Container(
-                                    width: 120,
-                                    margin: const EdgeInsets.only(right: 10),
-                                    child: ClipRRect(
-                                      borderRadius: BorderRadius.circular(10),
-                                      child: path.startsWith('http')
-                                          ? Image.network(
-                                              path,
-                                              fit: BoxFit.cover,
-                                            )
-                                          : Image.file(
-                                              File(path),
-                                              fit: BoxFit.cover,
-                                            ),
+                                  SizedBox(
+                                    width: width,
+                                    child: TextFormField(
+                                      controller: _nombreController,
+                                      enabled: !_guardando,
+                                      textCapitalization:
+                                          TextCapitalization.sentences,
+                                      maxLength: 200,
+                                      decoration: const InputDecoration(
+                                        labelText: 'Nombre del artículo',
+                                        prefixIcon:
+                                            Icon(Icons.inventory_2_outlined),
+                                        counterText: '',
+                                      ),
+                                      validator: (value) {
+                                        final clean = value?.trim() ?? '';
+                                        if (clean.isEmpty) {
+                                          return 'Ingrese el nombre del artículo.';
+                                        }
+                                        if (clean.length < 2) {
+                                          return 'Use al menos 2 caracteres.';
+                                        }
+                                        return null;
+                                      },
                                     ),
                                   ),
-                                  Positioned(
-                                    right: 15,
-                                    top: 5,
-                                    child: GestureDetector(
-                                      onTap: () => setState(
-                                        () => _listaFotosPaths.removeAt(index),
-                                      ),
-                                      child: const CircleAvatar(
-                                        backgroundColor: Colors.red,
-                                        radius: 12,
-                                        child: Icon(
-                                          Icons.close,
-                                          size: 16,
-                                          color: Colors.white,
-                                        ),
+                                  SizedBox(
+                                    width: width,
+                                    child: DropdownButtonFormField<String>(
+                                      initialValue: _categorias.contains(
+                                        _categoriaSeleccionada,
+                                      )
+                                          ? _categoriaSeleccionada
+                                          : 'General',
+                                      isExpanded: true,
+                                      items: _categorias
+                                          .map(
+                                            (category) => DropdownMenuItem(
+                                              value: category,
+                                              child: Text(
+                                                category,
+                                                overflow: TextOverflow.ellipsis,
+                                              ),
+                                            ),
+                                          )
+                                          .toList(growable: false),
+                                      onChanged: _guardando
+                                          ? null
+                                          : (value) => setState(
+                                                () => _categoriaSeleccionada =
+                                                    value ?? 'General',
+                                              ),
+                                      decoration: InputDecoration(
+                                        labelText: _cargandoCategorias
+                                            ? 'Cargando categorías…'
+                                            : 'Categoría',
+                                        prefixIcon:
+                                            const Icon(Icons.sell_outlined),
                                       ),
                                     ),
                                   ),
@@ -357,82 +474,242 @@ class _FormularioScreenState extends State<FormularioScreen> {
                               );
                             },
                           ),
-                        ),
-                        const SizedBox(height: 20),
-                        TextField(
-                          controller: _nombreController,
-                          decoration: const InputDecoration(
-                            labelText: 'Nombre del Artículo',
-                          ),
-                        ),
-                        const SizedBox(height: 10),
-                        DropdownButtonFormField<String>(
-                          initialValue: _categoriasExistentes.contains(
-                            _categoriaSeleccionada,
-                          )
-                              ? _categoriaSeleccionada
-                              : 'General',
-                          items: _categoriasExistentes
-                              .map(
-                                (cat) => DropdownMenuItem(
-                                  value: cat,
-                                  child: Text(cat),
-                                ),
-                              )
-                              .toList(),
-                          onChanged: (val) =>
-                              setState(() => _categoriaSeleccionada = val!),
-                          decoration: const InputDecoration(
-                            labelText: 'Categoría',
-                          ),
-                        ),
-                        if (_categoriaSeleccionada == 'Otros')
-                          Padding(
-                            padding: const EdgeInsets.only(top: 10),
-                            child: TextField(
+                          if (_categoriaSeleccionada == 'Otros') ...[
+                            const SizedBox(height: 14),
+                            TextFormField(
                               controller: _nuevaCategoriaController,
+                              enabled: !_guardando,
+                              maxLength: 100,
+                              textCapitalization: TextCapitalization.sentences,
                               decoration: const InputDecoration(
-                                labelText: 'Nombre de la Nueva Categoría',
+                                labelText: 'Nueva categoría',
+                                prefixIcon: Icon(Icons.add_box_outlined),
+                                counterText: '',
                               ),
+                              validator: (value) {
+                                if (_categoriaSeleccionada != 'Otros') {
+                                  return null;
+                                }
+                                final clean = value?.trim() ?? '';
+                                return clean.length < 2
+                                    ? 'Ingrese una categoría válida.'
+                                    : null;
+                              },
+                            ),
+                          ],
+                          const SizedBox(height: 14),
+                          TextFormField(
+                            controller: _obsController,
+                            enabled: !_guardando,
+                            minLines: 4,
+                            maxLines: 8,
+                            maxLength: 4000,
+                            textCapitalization: TextCapitalization.sentences,
+                            decoration: const InputDecoration(
+                              labelText: 'Observaciones técnicas',
+                              alignLabelWithHint: true,
+                              prefixIcon: Icon(Icons.notes_rounded),
                             ),
                           ),
-                        const SizedBox(height: 10),
-                        TextField(
-                          controller: _obsController,
-                          maxLines: 3,
-                          decoration: const InputDecoration(
-                            labelText: 'Observaciones Técnicas',
+                          const SizedBox(height: 18),
+                          FilledButton.icon(
+                            onPressed: _guardando ? null : _guardarArticulo,
+                            icon: const Icon(Icons.save_outlined),
+                            label: Text(
+                              editing ? 'Guardar cambios' : 'Guardar artículo',
+                            ),
+                            style: FilledButton.styleFrom(
+                              minimumSize: const Size.fromHeight(56),
+                            ),
                           ),
-                        ),
-                      ],
+                        ],
+                      ),
                     ),
                   ),
                 ),
-                Padding(
-                  padding: const EdgeInsets.all(16.0),
-                  child: ElevatedButton(
-                    style: ElevatedButton.styleFrom(
-                      minimumSize: const Size.fromHeight(60),
-                      backgroundColor: Colors.red.shade900,
-                      foregroundColor: Colors.white,
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(12),
+              ),
+            ),
+            if (_guardando)
+              const Positioned.fill(
+                child: IgnorePointer(
+                  child: ColoredBox(
+                    color: Color(0x55000000),
+                    child: Center(
+                      child: Card(
+                        child: Padding(
+                          padding: EdgeInsets.symmetric(
+                            horizontal: 22,
+                            vertical: 18,
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              SizedBox(
+                                width: 22,
+                                height: 22,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2.5,
+                                ),
+                              ),
+                              SizedBox(width: 14),
+                              Text('Procesando…'),
+                            ],
+                          ),
+                        ),
                       ),
                     ),
-                    onPressed: _guardarArticulo,
-                    child: Text(
-                      widget.registroEdicion == null
-                          ? "GUARDAR ARTÍCULO"
-                          : "GUARDAR CAMBIOS",
-                      style: const TextStyle(
-                        fontWeight: FontWeight.bold,
-                        fontSize: 18,
-                      ),
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _PhotoStrip extends StatelessWidget {
+  final List<String> photos;
+  final bool canAdd;
+  final VoidCallback onAdd;
+  final ValueChanged<int> onRemove;
+
+  const _PhotoStrip({
+    required this.photos,
+    required this.canAdd,
+    required this.onAdd,
+    required this.onRemove,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    if (photos.isEmpty) {
+      return Semantics(
+        button: true,
+        label: 'Agregar fotografía obligatoria',
+        child: InkWell(
+          borderRadius: BorderRadius.circular(18),
+          onTap: onAdd,
+          child: Container(
+            height: 142,
+            decoration: BoxDecoration(
+              color: AppColors.surface,
+              borderRadius: BorderRadius.circular(18),
+              border: Border.all(color: AppColors.border),
+            ),
+            child: const Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(
+                  Icons.add_photo_alternate_outlined,
+                  size: 38,
+                  color: AppColors.primary,
+                ),
+                SizedBox(height: 10),
+                Text(
+                  'Agregar fotografía',
+                  style: TextStyle(fontWeight: FontWeight.w700),
+                ),
+                SizedBox(height: 4),
+                Text(
+                  'Cámara o galería',
+                  style: TextStyle(color: AppColors.textMuted),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+
+    return SizedBox(
+      height: 142,
+      child: ListView.separated(
+        scrollDirection: Axis.horizontal,
+        itemCount: photos.length + (canAdd ? 1 : 0),
+        separatorBuilder: (_, __) => const SizedBox(width: 10),
+        itemBuilder: (context, index) {
+          if (index == photos.length) {
+            return OutlinedButton(
+              onPressed: onAdd,
+              style: OutlinedButton.styleFrom(
+                minimumSize: const Size(112, 142),
+                padding: const EdgeInsets.all(12),
+              ),
+              child: const Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(Icons.add_photo_alternate_outlined, size: 30),
+                  SizedBox(height: 8),
+                  Text('Agregar'),
+                ],
+              ),
+            );
+          }
+
+          final path = photos[index];
+          final image = path.startsWith('http')
+              ? Image.network(
+                  path,
+                  fit: BoxFit.cover,
+                  cacheWidth: 320,
+                  loadingBuilder: (_, child, progress) => progress == null
+                      ? child
+                      : const Center(child: CircularProgressIndicator()),
+                  errorBuilder: (_, __, ___) => const _BrokenPhoto(),
+                )
+              : Image.file(
+                  File(path),
+                  fit: BoxFit.cover,
+                  cacheWidth: 320,
+                  errorBuilder: (_, __, ___) => const _BrokenPhoto(),
+                );
+          return SizedBox(
+            width: 128,
+            child: Stack(
+              children: [
+                Positioned.fill(
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(16),
+                    child: ColoredBox(
+                      color: AppColors.surfaceRaised,
+                      child: image,
                     ),
+                  ),
+                ),
+                Positioned(
+                  top: 6,
+                  right: 6,
+                  child: IconButton.filled(
+                    tooltip: 'Quitar fotografía ${index + 1}',
+                    style: IconButton.styleFrom(
+                      backgroundColor: const Color(0xCC111318),
+                      minimumSize: const Size(42, 42),
+                    ),
+                    onPressed: () => onRemove(index),
+                    icon: const Icon(Icons.close_rounded, size: 20),
                   ),
                 ),
               ],
             ),
+          );
+        },
+      ),
+    );
+  }
+}
+
+class _BrokenPhoto extends StatelessWidget {
+  const _BrokenPhoto();
+
+  @override
+  Widget build(BuildContext context) {
+    return const Center(
+      child: Icon(
+        Icons.broken_image_outlined,
+        color: AppColors.textMuted,
+        size: 32,
+      ),
     );
   }
 }

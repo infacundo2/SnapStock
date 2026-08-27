@@ -32,9 +32,9 @@ android {
     defaultConfig {
         applicationId = "com.example.foto_catalogo"
         minSdk = flutter.minSdkVersion
-        targetSdk = 34
-        versionCode = 1
-        versionName = "3.0.0" 
+        targetSdk = 36
+        versionCode = flutter.versionCode
+        versionName = flutter.versionName
     }
 
     flavorDimensions += "environment"
@@ -66,8 +66,12 @@ android {
         getByName("release") {
             signingConfig = signingConfigs.getByName(if (hasReleaseKey) "release" else "debug")
             
-            isMinifyEnabled = false
-            isShrinkResources = false
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
         }
     }
 
